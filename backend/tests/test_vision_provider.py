@@ -11,6 +11,7 @@ from app.services.vision import (
     OpenAIResponsesVisionProvider,
     VisionImage,
     VisionMalformedResponseError,
+    VisionProviderError,
     VisionRateLimitError,
 )
 
@@ -72,6 +73,16 @@ async def test_openai_adapter_maps_rate_limit():
 
     provider = OpenAIResponsesVisionProvider("x", "m", transport=httpx.MockTransport(handler))
     with pytest.raises(VisionRateLimitError):
+        await provider.classify([], {})
+
+
+@pytest.mark.asyncio
+async def test_openai_adapter_maps_timeouts_without_leaking_provider_details():
+    async def handler(request):
+        raise httpx.ReadTimeout("private transport detail")
+
+    provider = OpenAIResponsesVisionProvider("x", "m", transport=httpx.MockTransport(handler))
+    with pytest.raises(VisionProviderError, match="timed out"):
         await provider.classify([], {})
 
 

@@ -48,9 +48,9 @@ Open the Vite URL (normally `http://localhost:5173`). The frontend proxies `/api
 
 ## API
 
-- `GET /api/health`: backend status plus whether a usable AI provider is available. The current placeholder provider is unavailable; credentials are never returned.
+- `GET /api/health`: backend status plus whether a usable AI provider is available; credentials are never returned.
 - `POST /api/analyze`: multipart upload with required `before_image` and `after_image`; optional `location`, `before_acquisition_date`, `after_acquisition_date`, `comparison_mode` (`registered` by default, or `original` to skip registration and appearance normalization), and `ai_consent` (defaults to false). Dates use `YYYY-MM-DD`.
-- `GET /api/samples`: lists complete synthetic demo pairs and their metadata. `GET /api/samples/{scenario_id}/{filename}` serves only the listed pair assets.
+- `GET /api/samples`: lists complete synthetic demo pairs and their metadata from `data/samples/`. Each scenario folder contains `scenario.json`, `before.png`, and `after.png`. `GET /api/samples/{scenario_id}/{filename}` serves only the listed pair assets.
 - `GET /api/report/{analysis_id}`: retrieves the validated analysis and intelligence report for 24 hours by default; expired or unknown IDs return `404`.
 - `GET /api/report/{analysis_id}/download?format=json|markdown|html`: downloads the same retained report (JSON by default), including metrics, regions, evidence previews, classification details, caveats, and verification steps. Unknown or expired IDs return `404`.
 
@@ -76,7 +76,7 @@ Common errors include `400` for corrupt or over-dimensioned images, `413` for ov
 
 ## Hackathon demo sequence
 
-The repository includes three reproducible, computer-generated pairs in `data/samples/`: vegetation loss, new construction/land disturbance, and flood-like water expansion. These are explicitly synthetic fixtures, not satellite observations. Regenerate the exact pairs with `python scripts/generate_demo_samples.py`.
+The repository includes four computer-generated sample pairs in `data/samples/`: vegetation loss, new construction/land disturbance, flood-like water expansion, and surface addition. These are explicitly synthetic fixtures, not satellite observations. The generator script creates the first three with `python scripts/generate_demo_samples.py`.
 
 1. Start the API and Vite frontend using the commands above.
 2. Select **Sample Scenarios** (or **New Analysis**) and load a synthetic pair. The chooser shows its scenario metadata and labels the images as computer generated.

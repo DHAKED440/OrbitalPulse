@@ -35,12 +35,21 @@ export async function getSampleFile(asset: SampleAsset): Promise<File> {
   return new File([blob], asset.filename, { type: asset.media_type })
 }
 
-export async function analyzeImages(before: File, after: File, comparisonMode: 'registered' | 'original' = 'registered', aiConsent = false): Promise<AnalysisResult> {
+export async function analyzeImages(
+  before: File,
+  after: File,
+  comparisonMode: 'registered' | 'original' = 'registered',
+  aiConsent = false,
+  metadata: { location?: string; beforeDate?: string; afterDate?: string } = {},
+): Promise<AnalysisResult> {
   const body = new FormData()
   body.append('before_image', before)
   body.append('after_image', after)
   body.append('comparison_mode', comparisonMode)
   body.append('ai_consent', String(aiConsent))
+  if (metadata.location?.trim()) body.append('location', metadata.location.trim())
+  if (metadata.beforeDate) body.append('before_acquisition_date', metadata.beforeDate)
+  if (metadata.afterDate) body.append('after_acquisition_date', metadata.afterDate)
   const response = await timedFetch(apiUrl('/api/analyze'), { method: 'POST', body })
   if (!response.ok) {
     const detail = await response.json().catch(() => null)

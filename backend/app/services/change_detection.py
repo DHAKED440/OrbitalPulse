@@ -302,11 +302,11 @@ def compare_images(
         })
 
     overlay = cv2.addWeighted(before, 0.5, aligned_after, 0.5, 0)
-    preview_scale_x, preview_scale_y = width / before_width, height / before_height
     for region in regions_work:
-        x, y = round(region["x"] * preview_scale_x), round(region["y"] * preview_scale_y)
-        x2 = round((region["x"] + region["width"]) * preview_scale_x)
-        y2 = round((region["y"] + region["height"]) * preview_scale_y)
+        # The overlay is drawn on the working-resolution images, so use the
+        # same coordinates as connected components (before scaling API boxes).
+        x, y = int(region["x"]), int(region["y"])
+        x2, y2 = x + int(region["width"]), y + int(region["height"])
         cv2.rectangle(overlay, (x, y), (x2, y2), (0, 220, 255), 2)
 
     heatmap = cv2.applyColorMap(filtered_mask, cv2.COLORMAP_TURBO)

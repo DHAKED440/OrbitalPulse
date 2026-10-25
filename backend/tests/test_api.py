@@ -217,7 +217,7 @@ def test_synthetic_scenarios_are_served_and_detected_by_normal_pipeline(client, 
     listing = client.get("/api/samples")
     assert listing.status_code == 200
     scenarios = listing.json()["samples"]
-    assert {item["id"] for item in scenarios} == {"vegetation-loss", "new-construction", "flood-expansion"}
+    assert {item["id"] for item in scenarios} == {"vegetation-loss", "new-construction", "flood-expansion", "surface-addition"}
 
     for scenario in scenarios:
         assert scenario["synthetic"] is True

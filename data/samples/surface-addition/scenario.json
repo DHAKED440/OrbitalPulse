@@ -1,0 +1,8 @@
+{
+  "id": "surface-addition",
+  "title": "Surface addition",
+  "category": "SURFACE ADDITION",
+  "description": "Synthetic terrain pair showing a newly added surface feature between two captures.",
+  "expected_change": "A localized new surface feature appears in the later image.",
+  "synthetic": true
+}
