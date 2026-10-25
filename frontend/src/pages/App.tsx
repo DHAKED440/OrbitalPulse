@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { analyzeImages } from '../services/api'
 import type { AnalysisResult } from '../types/analysis'
 
-type NavItem = 'Overview' | 'Analysis History' | 'Sample Scenarios' | 'Settings'
+type NavItem = 'Overview' | 'New Analysis' | 'Analysis History' | 'Sample Scenarios' | 'Settings'
 type Target = { id: string; severity: string; title: string; area: string; confidence: string; status: string; tone: 'critical' | 'moderate' | 'elevated' | 'low' }
 
 const initialTargets: Target[] = [
@@ -76,7 +76,7 @@ export default function App() {
     <aside className="sidebar">
       <div><div className="nav-caption">MISSION OPERATIONS</div>
         <button className={`nav-item ${nav === 'Overview' ? 'active' : ''}`} onClick={() => setNav('Overview')}><Glyph>◈</Glyph><span>Overview</span></button>
-        <button className="nav-item nav-new" onClick={() => { setNav('Overview'); setUploadOpen(true) }}><Glyph>⊕</Glyph><span>New Analysis</span></button>
+        <button className={`nav-item nav-new ${nav === 'New Analysis' ? 'active' : ''}`} onClick={() => setNav('New Analysis')}><Glyph>⊕</Glyph><span>New Analysis</span></button>
         <button className={`nav-item ${nav === 'Analysis History' ? 'active' : ''}`} onClick={() => { setNav('Analysis History'); setNotice(result ? `Latest run: ${result.analysis_id.slice(0, 8)}` : 'No saved analyses in this session yet') }}><Glyph>◴</Glyph><span>Analysis History</span><b className="nav-count">{result ? '01' : '24'}</b></button>
         <button className={`nav-item ${nav === 'Sample Scenarios' ? 'active' : ''}`} onClick={() => setNav('Sample Scenarios')}><Glyph>⌗</Glyph><span>Sample Scenarios</span><b className="nav-live">4 LIVE</b></button>
         <button className={`nav-item ${nav === 'Settings' ? 'active' : ''}`} onClick={() => { setNav('Settings'); setPipelineOpen(true) }}><Glyph>☷</Glyph><span>Settings</span></button>
@@ -85,6 +85,7 @@ export default function App() {
     </aside>
 
     <main className="main-area">
+      {nav === 'New Analysis' ? <ComparisonWorkbench before={before} after={after} previews={previews} result={result} busy={busy} error={error} onRun={submit} onUpload={() => setUploadOpen(true)} onExport={exportReport} /> : <>
       <section className="mission-heading">
         <div className="mission-copy"><div className="mission-meta"><span className="chip chip-lime"><i className="dot dot-lime" /> {scenario}</span><span className="coordinates">{previews ? 'CUSTOM INPUT · GEOLOCATION METADATA UNAVAILABLE' : 'LAT: -23.8206° &nbsp;|&nbsp; LON: -68.2396° · SAMPLE'}</span></div><h1>Earth changes. Decoded.</h1><p>Compare satellite and aerial captures, investigate pixel-level changes, and prepare an explainable brief for analyst review.</p></div>
         <div className="main-actions"><button className="button button-secondary" onClick={() => setPipelineOpen(true)}><Glyph>☷</Glyph> Configure AI Pipeline</button><button className="button button-secondary" onClick={exportReport}><Glyph>⇩</Glyph> Export Report</button><button className="button button-primary" onClick={submit} disabled={busy}><Glyph>⊞</Glyph> {busy ? 'Analyzing…' : 'Run Change Detection'} <small>LOCAL CV</small></button></div>
@@ -124,10 +125,92 @@ export default function App() {
       </section>
 
       {error && <div className="toast error-toast" role="alert">{error}<button onClick={() => setError('')}>×</button></div>}
+      </>}
     </main>
 
     {uploadOpen && <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) setUploadOpen(false) }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="upload-title"><header><div><span className="section-label">NEW MISSION ANALYSIS</span><h2 id="upload-title">Add acquisition pair</h2></div><button className="icon-button" onClick={() => setUploadOpen(false)} aria-label="Close">×</button></header><p className="modal-copy">Select baseline and latest captures. The local CV pipeline compares them without an external AI service.</p><div className="file-slots">{[{ label: 'T0 / BASELINE CAPTURE', file: before, set: setBefore }, { label: 'T1 / LATEST CAPTURE', file: after, set: setAfter }].map(slot => <label key={slot.label} className="file-slot"><span className="section-label">{slot.label}</span><span className="file-plus">＋</span><b>{slot.file?.name ?? 'Choose image'}</b><small>PNG, JPEG, or WebP · up to 20 MB</small><input type="file" accept="image/png,image/jpeg,image/webp" onChange={e => slot.set(e.target.files?.[0] ?? null)} /></label>)}</div>{error && <p className="modal-error" role="alert">{error}</p>}<footer><span>Images remain on this local workstation.</span><button className="button button-primary" onClick={submit} disabled={!before || !after || busy}>{busy ? 'Analyzing…' : 'Run local comparison →'}</button></footer></section></div>}
 
     {pipelineOpen && <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) setPipelineOpen(false) }}><section className="modal pipeline-modal" role="dialog" aria-modal="true" aria-labelledby="pipeline-title"><header><div><span className="section-label">PROCESSING CONFIGURATION</span><h2 id="pipeline-title">AI pipeline</h2></div><button className="icon-button" onClick={() => setPipelineOpen(false)} aria-label="Close">×</button></header><div className="pipeline-setting"><div><b>Local image comparison</b><span>OpenCV absolute difference · always available</span></div><span className="chip chip-lime">ACTIVE</span></div><div className="pipeline-setting"><div><b>Vision model provider</b><span>External provider is not configured</span></div><span className="chip">DISABLED</span></div><div className="pipeline-setting"><div><b>Anomaly gain threshold</b><span>Adjust sensitivity of changed pixel detection</span></div><input type="range" min="0" max="100" value={gain} onChange={e => setGain(Number(e.target.value))} /></div><p className="modal-copy">Current backend uses a fixed pixel threshold. Gain is a dashboard control for this prototype; provider analysis and causal classification are not enabled.</p><footer><span>Configuration is local to this session.</span><button className="button button-primary" onClick={() => setPipelineOpen(false)}>Done</button></footer></section></div>}
+  </div>
+}
+
+type WorkbenchProps = {
+  before: File | null
+  after: File | null
+  previews: { before: string; after: string } | null
+  result: AnalysisResult | null
+  busy: boolean
+  error: string
+  onRun: () => void | Promise<void>
+  onUpload: () => void
+  onExport: () => void
+}
+
+const sampleRegions = [
+  { id: 'REG-01', name: 'Lithium Dike Rupture', confidence: '98.4%', severity: 'CRITICAL', area: '1.14 km²' },
+  { id: 'REG-02', name: 'Access Corridor', confidence: '88.1%', severity: 'MODERATE', area: '0.68 km²' },
+  { id: 'REG-03', name: 'Brine Flux Wetland', confidence: '92.5%', severity: 'ELEVATED', area: '0.45 km²' },
+  { id: 'REG-04', name: 'Shadow Flux', confidence: '64.2%', severity: 'LOW', area: '0.14 km²' },
+]
+
+function ComparisonWorkbench({ before, after, previews, result, busy, error, onRun, onUpload, onExport }: WorkbenchProps) {
+  const [view, setView] = useState('Dual-Swipe')
+  const [swipe, setSwipe] = useState(50)
+  const [zoom, setZoom] = useState(1)
+  const [blinkAfter, setBlinkAfter] = useState(false)
+  const [selected, setSelected] = useState('REG-01')
+  const [notice, setNotice] = useState('')
+  const region = sampleRegions.find(item => item.id === selected) ?? sampleRegions[0]
+
+  useEffect(() => {
+    if (view !== 'Blink' || !previews) { setBlinkAfter(false); return }
+    const interval = window.setInterval(() => setBlinkAfter(value => !value), 750)
+    return () => window.clearInterval(interval)
+  }, [view, previews])
+
+  const openComparison = () => {
+    if (view === 'Blink' && previews) return <img className="workbench-sample" src={blinkAfter ? previews.after : previews.before} alt={blinkAfter ? 'Latest uploaded image' : 'Baseline uploaded image'} />
+    if (previews && view === 'Dual-Swipe') return <div className="workbench-swipe"><img className="workbench-before" src={previews.before} alt={`Baseline image ${before?.name ?? ''}`} /><div className="workbench-after" style={{ clipPath: `inset(0 0 0 ${swipe}%)` }}><img src={previews.after} alt={`Latest image ${after?.name ?? ''}`} /></div><span className="workbench-divider" style={{ left: `${swipe}%` }} /></div>
+    if (previews) return <div className="workbench-pair"><div><img src={previews.before} alt={`Baseline image ${before?.name ?? ''}`} /></div><div><img src={previews.after} alt={`Latest image ${after?.name ?? ''}`} /></div></div>
+    return <img className="workbench-sample" src="/samples/atacama-workbench.png" alt="Illustrative Atacama satellite comparison with sample change regions" />
+  }
+
+  return <div className="comparison-workbench">
+    <div className="workbench-topline"><div><span className="section-label">{previews ? 'CUSTOM IMAGE PAIR' : 'AOI-8492 / SAMPLE SCENARIO'}</span><b>{previews ? 'LOCAL IMAGE COMPARISON' : 'SALAR DE ATACAMA · LITHIUM EVAPORATION SECTOR 4'}</b></div><div className="workbench-synthesis"><span>{previews ? 'RGB INPUTS · GEOLOCATION UNKNOWN' : 'SAMPLE BAND SYNTHESIS · RGB / SWIR COMPOSITE'}</span><b className="cv-status"><i className="dot dot-sage" /> LOCAL CV {result ? 'COMPLETE' : 'READY'}</b></div></div>
+    <div className="workbench-modebar"><div className="mode-tabs">{['Dual-Swipe', 'Diff Heatmap', 'Vector Overlay', 'Blink'].map(item => <button key={item} className={view === item ? 'selected' : ''} onClick={() => setView(item)}>{item}</button>)}</div><div className="modebar-right">{view === 'Dual-Swipe' && previews && <label className="swipe-control">SWIPE <input aria-label="Image reveal position" type="range" min="5" max="95" value={swipe} onChange={e => setSwipe(Number(e.target.value))} /> {swipe}%</label>}<button className="button button-primary workbench-run" onClick={onRun} disabled={busy}>{busy ? 'Analyzing…' : result ? 'Run Again' : 'Run Change Detection'}</button></div></div>
+
+    <div className="comparison-layout">
+      <section className={`comparison-view view-${view.toLowerCase().replaceAll(' ', '-')} ${previews ? 'has-uploads' : 'sample-view'}`}>
+        <div className="compare-canvas"><div className="compare-art" style={{ transform: `scale(${zoom})` }}>{openComparison()}</div>
+          <div className="capture-label capture-before"><i className="dot dot-sage" /><div><b>T0 · BEFORE CAPTURE</b><small>{previews ? before?.name : '2024-04-12 09:14 UTC · SENTINEL-2C · SAMPLE'}</small></div></div>
+          <div className="capture-label capture-after"><i className="dot dot-lime" /><div><b>T1 · AFTER CAPTURE</b><small>{previews ? after?.name : '2024-10-28 10:22 UTC · WORLDVIEW-3 · SAMPLE'}</small></div></div>
+          {view === 'Diff Heatmap' && <div className="map-mode-note">{result ? 'METRICS AVAILABLE · SPATIAL MASK NOT RETURNED BY API' : 'ILLUSTRATIVE SAMPLE HEATMAP VIEW'}</div>}
+          {view === 'Vector Overlay' && <div className="map-mode-note">{previews ? 'VECTOR OUTPUT NEEDS GEOREFERENCED IMAGERY' : 'SAMPLE VECTOR ANNOTATIONS · NOT COMPUTED FROM UPLOADS'}</div>}
+          {view === 'Blink' && previews && <div className="blink-indicator">BLINK · {blinkAfter ? 'T1' : 'T0'}</div>}
+          {!previews && <div className="canvas-coordinates">23°49′14.28″S&nbsp; 68°14′22.04″W · 2,341m ELEV · SAMPLE</div>}
+          <div className="canvas-zoom"><button aria-label="Zoom in" onClick={() => setZoom(value => Math.min(1.6, value + .1))}>＋</button><button aria-label="Zoom out" onClick={() => setZoom(value => Math.max(1, value - .1))}>−</button><span>{Math.round(zoom * 100)}%</span><button aria-label="Reset zoom" onClick={() => setZoom(1)}>⛶</button></div>
+        </div>
+        <div className="layer-controls"><span className="layer-heading">DISPLAY LAYERS</span><label title="Bounding boxes are part of the sample scene"><input type="checkbox" checked readOnly disabled /> Bounding Boxes <b>{previews ? 'UNAVAILABLE' : 'SAMPLE'}</b></label><label title="The current API returns summary metrics, not an image mask"><input type="checkbox" disabled /> Change Mask <b>API PENDING</b></label><label><input type="checkbox" disabled /> Contours</label><label><input type="checkbox" disabled /> Thermal IR</label><span className="layer-note">Local API returns pixel metrics; geospatial overlays are not generated.</span></div>
+        <div className="canvas-status"><span>RGB PREVIEW</span><span>{previews ? 'ACQUISITION METADATA UNAVAILABLE' : 'SAMPLE · CLOUD 0.00% · GSD 0.31m/px'}</span><span className="canvas-status-right">{result ? `${result.changed_percent.toFixed(2)}% PIXEL CHANGE` : 'SAMPLE SCENE'}</span></div>
+      </section>
+
+      <aside className="region-inspector">
+        <div className="inspector-header"><span><Glyph>⌖</Glyph> REGION INSPECTOR</span><b>{result ? 'LOCAL RESULT' : 'SAMPLE'}</b></div>
+        {result ? <>
+          <div className="inspector-title"><small>ANALYSIS · {result.analysis_id.slice(0, 8).toUpperCase()}</small><h2>Change candidates</h2><span className="risk-chip moderate">PIXEL SIGNAL · CAUSE UNASSESSED</span></div>
+          <section className="inspector-card"><h3>LOCAL CHANGE METRICS <span>NO GEOREFERENCE</span></h3><div className="inspector-stats"><div><small>PIXELS CHANGED</small><b>{result.changed_pixels.toLocaleString()}</b></div><div><small>IMAGE PIXELS</small><b>{result.total_pixels.toLocaleString()}</b></div><div><small>AREA DELTA</small><b>{result.changed_percent.toFixed(2)}%</b></div><div><small>CONNECTED REGIONS</small><b>{result.changed_regions}</b></div></div></section>
+          <section className="inspector-card"><h3>CV SUMMARY</h3><p>{result.summary}</p><small className="inspector-disclaimer">Grayscale absolute difference with a fixed threshold. This result does not classify causes or provide vector polygons.</small></section>
+        </> : <>
+          <div className="inspector-title"><small>{region.id} · SELECTED SAMPLE REGION</small><h2>{region.name}</h2><span className="risk-chip critical"><i className="dot dot-coral" /> SAMPLE CRITICAL HAZARD <b>{region.confidence} SAMPLE</b></span></div>
+          <section className="inspector-card"><h3>REGION SELECTION <span>ILLUSTRATIVE</span></h3><div className="region-selector">{sampleRegions.map(item => <button key={item.id} className={selected === item.id ? 'selected' : ''} onClick={() => setSelected(item.id)}><b>{item.id}</b><span>{item.name}</span><small>{item.confidence}</small></button>)}</div></section>
+          <section className="inspector-card"><h3>SPATIAL METRICS <span>DEMO DATA</span></h3><div className="inspector-stats"><div><small>LAT RANGE</small><b>23.8206° → 23.8241°S</b></div><div><small>LON RANGE</small><b>68.2396° → 68.2348°W</b></div><div><small>PIXEL FOOTPRINT</small><b>{region.area} · SAMPLE</b></div><div><small>FRAME DELTA</small><b>+7.2% · SAMPLE</b></div></div></section>
+          <section className="inspector-card spectrum-card"><h3>SPECTRAL SHIFT <span>SAMPLE ONLY</span></h3><svg viewBox="0 0 260 56" role="img" aria-label="Illustrative spectral shift chart"><path d="M3 12 C42 18 58 40 91 33 S142 10 174 21 S218 44 257 38"/><path className="spectral-secondary" d="M3 28 C43 14 66 17 94 24 S139 46 175 29 S225 18 257 24"/><circle cx="92" cy="33" r="3"/><circle cx="175" cy="29" r="3"/></svg><div className="band-legend"><span>B02 <b>0.49μm</b></span><span>B08A <b>0.86μm</b></span><span>SWIR-2 <b>2.20μm</b></span></div><p>Spectral values are illustrative only; the local upload path compares RGB image pixels.</p></section>
+          <section className="inspector-card observation-card"><h3>LOCAL CV OBSERVATIONS</h3><p><b>Thresholded pixel change:</b> Candidate regions are based on local RGB difference, not a trained event classifier.</p><p><b>Cause assessment:</b> Natural versus human-made activity remains unresolved.</p></section>
+        </>}
+        <div className="inspector-actions"><button className="button button-primary" onClick={onRun} disabled={busy}>{busy ? 'Analyzing…' : previews ? 'Run Local Comparison' : 'Add Images to Analyze'}</button><button className="button button-secondary" onClick={onUpload}><Glyph>＋</Glyph> Choose Image Pair</button><button className="button button-secondary" onClick={onExport}><Glyph>⇩</Glyph> Export JSON</button><button className="button button-secondary" onClick={() => setNotice('Geospatial export is unavailable until image registration is implemented.')}><Glyph>⌖</Glyph> Geospatial Export <small>Unavailable</small></button></div>
+        {notice && <p className="inspector-notice" role="status">{notice}</p>}
+      </aside>
+    </div>
+    {error && <div className="toast error-toast" role="alert">{error}</div>}
   </div>
 }
