@@ -11,7 +11,7 @@
   font-optical-sizing: auto;
 }
 * { box-sizing: border-box; }
-body { margin: 0; min-width: 360px; min-height: 100vh; }
+body { margin: 0; min-width: 360px; min-height: 100vh; overflow-x: clip; }
 button, input { font: inherit; }
 button { color: inherit; cursor: pointer; }
 button:focus-visible, input:focus-visible { outline: 1px solid #d7ff64; outline-offset: 2px; }
@@ -34,7 +34,7 @@ button:focus-visible, input:focus-visible { outline: 1px solid #d7ff64; outline-
   --mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
 }
 
-.workstation { min-height: 100vh; background: var(--void); }
+.workstation { min-height: 100vh; overflow-x: clip; background: var(--void); }
 .topbar { height: 44px; position: fixed; inset: 0 0 auto 0; z-index: 30; display: flex; align-items: stretch; background: #14161c; border-bottom: 1px solid var(--line); }
 .brand-block { width: 204px; flex: 0 0 204px; display: flex; gap: 9px; align-items: center; padding: 0 15px; background: var(--lowest); border-right: 1px solid var(--line); }
 .brand-mark { display: grid; place-items: center; height: 25px; width: 25px; border-radius: 50%; border: 1px solid #d7ff6488; color: var(--lime); font-size: 21.25px; line-height: 1; }
@@ -80,7 +80,7 @@ button:focus-visible, input:focus-visible { outline: 1px solid #d7ff64; outline-
 .telemetry-card > div:not(:first-child) span { color: var(--subtle); }
 .telemetry-card > div:not(:first-child) b { color: #d5d9df; font-size: 8.75px; font-weight: 400; }
 
-.main-area { width: calc(100% - 204px); max-width: 1700px; margin: 44px 0 0 204px; padding: 22px 24px 28px; }
+.main-area { zoom: 1.1; width: calc((100vw - 204px) / 1.1); max-width: calc(1700px / 1.1); margin: calc(44px / 1.1) 0 0 calc(204px / 1.1); padding: 22px 24px 28px; }
 .mission-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 17px; }
 .mission-copy { min-width: 350px; max-width: 650px; }
 .mission-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; margin-bottom: 9px; }
@@ -232,7 +232,7 @@ button:focus-visible, input:focus-visible { outline: 1px solid #d7ff64; outline-
 .error-toast { background: #32191c; border-color: #8f3f45; color: #ffb4ab; }
 
 @media (min-width: 1600px) {
-  .main-area { margin-left: 220px; width: calc(100% - 220px); padding-right: 30px; padding-left: 30px; }
+  .main-area { width: calc((100vw - 220px) / 1.1); max-width: calc(1700px / 1.1); margin: calc(44px / 1.1) 0 0 calc(220px / 1.1); padding-right: 30px; padding-left: 30px; }
   .brand-block, .sidebar { width: 220px; flex-basis: 220px; }
   .map-viewport { height: min(45vw, 600px); }
 }
@@ -248,9 +248,10 @@ button:focus-visible, input:focus-visible { outline: 1px solid #d7ff64; outline-
   .brand-block { width: 64px; flex-basis: 64px; padding: 0; justify-content: center; }.brand-block > span:last-child { display: none; }
   .sidebar { width: 64px; padding: 12px 7px 8px; }.nav-caption, .nav-item span:not(.glyph), .nav-count, .nav-live, .telemetry-card { display: none; }
   .nav-item { justify-content: center; padding: 0; }.nav-item .glyph { width: auto; font-size: 21.25px; }
-  .main-area { width: calc(100% - 64px); margin-left: 64px; padding: 18px 14px; }
+  .main-area { width: calc((100vw - 64px) / 1.1); margin: calc(44px / 1.1) 0 0 calc(64px / 1.1); padding: 18px 14px; }
   .topbar-content { padding: 0 8px; }.system-state { gap: 4px; }.utc-clock { display: none; }
   .mission-meta { gap: 7px; }.mission-heading p { max-width: 100%; }
+  .second-row { display: none; }
   .toolbar-row:first-child { flex-wrap: wrap; }
   .toolbar-row:first-child .viewer-actions { flex: 1 1 100%; flex-wrap: wrap; justify-content: flex-start; }
   .analysis-grid { grid-template-columns: 1fr; }
@@ -258,11 +259,11 @@ button:focus-visible, input:focus-visible { outline: 1px solid #d7ff64; outline-
   .map-viewport { height: clamp(270px, 48vw, 420px); }
 }
 @media (max-width: 560px) {
-  .main-area { width: 100%; margin: 44px 0 0; padding: 14px 10px 20px; }
+  .main-area { width: calc(100vw / 1.1); margin: calc(44px / 1.1) 0 0; padding: 14px 10px 20px; }
   .sidebar { display: none; }
   .topbar { height: 42px; }.brand-block { width: 48px; flex-basis: 48px; }.brand-mark { width: 23px; height: 23px; }
   .topbar-content { gap: 5px; }.crumb { font-size: 10px; gap: 5px; }.crumb .chip { display: none; }.system-state .chip { font-size: 8.75px; padding: 2px 4px; }.system-state .icon-button, .analyst, .avatar, .top-separator { display: none; }
-  .main-area { margin-top: 42px; }
+  .main-area { margin-top: calc(42px / 1.1); }
   .mission-heading h1 { font-size: 33.75px; }.mission-heading p { font-size: 13.75px; }
   .main-actions { display: grid; width: 100%; grid-template-columns: 1fr 1fr; }.main-actions .button { padding: 0 7px; font-size: 10px; }.main-actions .button-primary { grid-column: 1 / -1; font-size: 12.5px; }
   .toolbar-row { align-items: flex-start; flex-direction: column; }.viewer-actions { width: 100%; justify-content: flex-end; }.segmented { max-width: 100%; overflow-x: auto; }.segmented button { font-size: 10px; padding: 0 6px; }
