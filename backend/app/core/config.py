@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     api_port: int = 8000
     max_upload_mb: int = 20
     storage_dir: Path = Path("backend/data")
+    sample_dir: Path = Path("data/samples")
     cors_origins: str = "http://localhost:5173"
     vision_provider: str = "disabled"
     vision_api_key: str | None = None

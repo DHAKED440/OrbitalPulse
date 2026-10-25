@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
-import { analyzeImages } from '../services/api'
-import type { AnalysisResult } from '../types/analysis'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { analyzeImages, apiUrl, getHealth, getReport, getSampleFile, listSamples } from '../services/api'
+import type { AnalysisResult, ApiHealth, SampleScenario } from '../types/analysis'
 
 type NavItem = 'Overview' | 'New Analysis' | 'Analysis History' | 'Intelligence Report' | 'Sample Scenarios' | 'Settings'
 type Target = { id: string; severity: string; title: string; area: string; confidence: string; status: string; tone: 'critical' | 'moderate' | 'elevated' | 'low' }
@@ -13,6 +13,22 @@ const initialTargets: Target[] = [
 ]
 
 const Glyph = ({ children }: { children: string }) => <span className="glyph" aria-hidden="true">{children}</span>
+const configuredUploadLimit = Number(import.meta.env.VITE_MAX_UPLOAD_MB ?? '20')
+const MAX_UPLOAD_BYTES = (Number.isFinite(configuredUploadLimit) && configuredUploadLimit > 0 ? configuredUploadLimit : 20) * 1024 * 1024
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
+
+async function validateImage(file: File): Promise<string | null> {
+  if (!IMAGE_TYPES.has(file.type)) return 'Choose a PNG, JPEG, or WebP image.'
+  if (file.size === 0) return 'The selected image is empty.'
+  if (file.size > MAX_UPLOAD_BYTES) return `Each image must be smaller than ${Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)} MB.`
+  try {
+    const decoded = await createImageBitmap(file)
+    const valid = decoded.width > 0 && decoded.height > 0
+    decoded.close()
+    if (!valid) return 'The selected file has no image dimensions.'
+  } catch { return 'The selected file could not be decoded as an image.' }
+  return null
+}
 
 export default function App() {
   const [before, setBefore] = useState<File | null>(null)
@@ -21,6 +37,8 @@ export default function App() {
   const [result, setResult] = useState<AnalysisResult | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const busyRef = useRef(false)
+  const requestVersion = useRef(0)
   const [uploadOpen, setUploadOpen] = useState(false)
   const [pipelineOpen, setPipelineOpen] = useState(false)
   const [nav, setNav] = useState<NavItem>('Overview')
@@ -31,11 +49,29 @@ export default function App() {
   const [gridOn, setGridOn] = useState(true)
   const [targets, setTargets] = useState(initialTargets)
   const [notice, setNotice] = useState('')
+  const [apiStatus, setApiStatus] = useState<'checking' | 'online' | 'offline'>('checking')
+  const [health, setHealth] = useState<ApiHealth | null>(null)
+  const [samples, setSamples] = useState<SampleScenario[]>([])
+  const [sampleScenario, setSampleScenario] = useState<SampleScenario | null>(null)
+  const [sampleError, setSampleError] = useState('')
+  const [location, setLocation] = useState('')
+  const [beforeDate, setBeforeDate] = useState('')
+  const [afterDate, setAfterDate] = useState('')
+  const [savedReport, setSavedReport] = useState<AnalysisResult | null>(null)
+  const [reportBusy, setReportBusy] = useState(false)
+  const [reportError, setReportError] = useState('')
 
-  const changed = result?.changed_percent ?? 14.82
-  const count = result?.changed_regions ?? 9
-  const scenario = useMemo(() => previews ? 'CUSTOM IMAGE PAIR / LOCAL ANALYSIS' : nav === 'Sample Scenarios' ? 'SAMPLE SCENARIOS / ATACAMA SALAR' : 'SAMPLE MISSION / SALAR-DELTA-094', [nav, previews])
+  const changed = result?.changed_percent
+  const count = result?.changed_regions
+  const scenario = useMemo(() => sampleScenario ? `SYNTHETIC DEMO / ${sampleScenario.category}` : previews ? 'CUSTOM IMAGE PAIR / LOCAL ANALYSIS' : nav === 'Sample Scenarios' ? 'SAMPLE SCENARIOS / ATACAMA SALAR' : 'SAMPLE MISSION / SALAR-DELTA-094', [nav, previews, sampleScenario])
   const displayedTargets: Target[] = result ? [{ id: result.analysis_id.slice(0, 8).toUpperCase(), severity: 'CANDIDATE', title: result.summary, area: 'Not georeferenced', confidence: 'N/A', status: 'Pixel signal · cause unclassified', tone: 'moderate' }] : targets
+
+  useEffect(() => {
+    let active = true
+    getHealth().then(data => { if (active) { setHealth(data); setApiStatus('online') } }).catch(() => { if (active) setApiStatus('offline') })
+    listSamples().then(data => { if (active) { setSamples(data); setSampleError('') } }).catch(error => { if (active) setSampleError(error instanceof Error ? error.message : 'Unable to load server samples.') })
+    return () => { active = false }
+  }, [])
 
   useEffect(() => {
     setResult(null)
@@ -48,17 +84,63 @@ export default function App() {
   }, [before, after])
 
   async function submit() {
-    if (!before || !after) { setUploadOpen(true); return }
-    setBusy(true); setError(''); setNotice('')
+    if (busyRef.current) return
+    if (!before || !after) { setError('Select both a baseline and a latest image before analysis.'); setUploadOpen(true); return }
+    const [beforeError, afterError] = await Promise.all([validateImage(before), validateImage(after)])
+    if (beforeError || afterError) { setError(beforeError ?? afterError ?? 'Choose valid images.'); setUploadOpen(true); return }
+    if (beforeDate && afterDate && beforeDate > afterDate) { setError('The baseline date must be on or before the latest image date.'); setUploadOpen(true); return }
+    busyRef.current = true
+    const requestVersionAtStart = ++requestVersion.current
+    setBusy(true); setError(''); setNotice(''); setResult(null); setSavedReport(null); setReportError('')
     try {
-      const data = await analyzeImages(before, after)
-      setResult(data); setUploadOpen(false); setNotice(`Analysis ${data.analysis_id.slice(0, 8)} complete`)
-    } catch (e) { setError(e instanceof Error ? e.message : 'Unable to analyze these images.') }
-    finally { setBusy(false) }
+      const data = await analyzeImages(before, after, { location, before_date: beforeDate || undefined, after_date: afterDate || undefined })
+      if (requestVersionAtStart === requestVersion.current) { setResult(data); setUploadOpen(false); setNotice(`Analysis ${data.analysis_id.slice(0, 8)} complete`) }
+    } catch (e) { if (requestVersionAtStart === requestVersion.current) setError(e instanceof Error ? e.message : 'Unable to analyze these images.') }
+    finally { busyRef.current = false; setBusy(false) }
   }
 
+  async function selectImage(file: File | undefined, setter: (file: File | null) => void) {
+    if (!file) return
+    const version = ++requestVersion.current
+    setResult(null); setSavedReport(null)
+    setSampleScenario(null)
+    const validationMessage = await validateImage(file)
+    if (version !== requestVersion.current) return
+    if (validationMessage) { setter(null); setError(`${file.name}: ${validationMessage}`); return }
+    setter(file); setError('')
+  }
+
+  async function useServerSamplePair(sample: SampleScenario) {
+    const version = ++requestVersion.current
+    try {
+      setSampleError('')
+      const [baseline, latest] = await Promise.all([getSampleFile(sample.before), getSampleFile(sample.after)])
+      const [baselineError, latestError] = await Promise.all([validateImage(baseline), validateImage(latest)])
+      if (version !== requestVersion.current) return
+      if (baselineError || latestError) throw new Error(baselineError ?? latestError ?? 'The sample pair is invalid.')
+      const labeledBaseline = new File([baseline], `${sample.id}-T0.png`, { type: baseline.type })
+      const labeledLatest = new File([latest], `${sample.id}-T1.png`, { type: latest.type })
+      setBefore(labeledBaseline); setAfter(labeledLatest); setSampleScenario(sample); setResult(null); setSavedReport(null); setError('')
+      setNotice(`Loaded synthetic scenario: ${sample.title}`)
+    } catch (error) {
+      if (version === requestVersion.current) setSampleError(error instanceof Error ? error.message : 'Unable to load this sample pair.')
+    }
+  }
+
+  useEffect(() => {
+    if (nav !== 'Intelligence Report' || !result) { setSavedReport(null); setReportBusy(false); return }
+    let active = true
+    setReportBusy(true); setReportError('')
+    getReport(result.analysis_id)
+      .then(report => { if (active) setSavedReport(report) })
+      .catch(error => { if (active) setReportError(error instanceof Error ? error.message : 'Could not retrieve the saved report.') })
+      .finally(() => { if (active) setReportBusy(false) })
+    return () => { active = false }
+  }, [nav, result?.analysis_id])
+
   function exportReport() {
-    const report = result ?? { analysis_id: 'DEMO-SALAR-094', changed_percent: changed, changed_pixels: 14230, total_pixels: 96000, summary: 'Sample scenario report. Run an analysis with your images to replace these metrics.', changed_regions: count, ai_analysis: null }
+    if (!result) { setNotice('Run an image analysis before exporting a report.'); return }
+    const report = result
     const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }))
     const link = document.createElement('a'); link.href = url; link.download = `orbitalpulse-${report.analysis_id}.json`; link.click(); URL.revokeObjectURL(url)
   }
@@ -70,7 +152,7 @@ export default function App() {
       <div className="brand-block"><span className="brand-mark">◉</span><span><b>ORBITAL<span>PULSE</span></b><small>GEO-INT PLATFORM</small></span></div>
       <div className="topbar-content">
         <div className="crumb"><span className="chip chip-lime">{nav === 'Intelligence Report' ? 'REPORT' : previews ? 'LOCAL' : 'SAMPLE'}</span><span>{nav === 'Intelligence Report' ? result ? `IR-${result.analysis_id.slice(0, 12).toUpperCase()}` : 'DRAFT-SALAR-094' : previews ? result?.analysis_id.slice(0, 16).toUpperCase() ?? 'NEW-IMAGE-PAIR' : 'ANOMALY-SURFACE-DELTA-094'}</span><i>//</i><span className="muted">{previews ? 'USER-IMAGES' : 'ATACAMA-SALAR-BASIN'}</span></div>
-        <div className="system-state"><span className="chip"><i className="dot dot-sage" /> LOCAL CV PIPELINE</span><span className="chip">AI PROVIDER DISABLED</span><span className="top-separator" /><button className="icon-button" aria-label="Notifications" onClick={() => setNotice('No new mission alerts')}><Glyph>♧</Glyph></button><span className="utc-clock"><i className="dot dot-lime" /> LOCAL SESSION</span><span className="analyst"><b>ANALYST CONSOLE</b><small>Mission workspace</small></span><span className="avatar">OP</span></div>
+        <div className="system-state"><span className="chip"><i className={`dot ${apiStatus === 'online' ? 'dot-sage' : 'dot-coral'}`} /> FASTAPI {apiStatus.toUpperCase()}</span><span className="chip">CV ACTIVE · AI {health?.vision_provider ?? 'OPTIONAL'}</span><span className="top-separator" /><button className="icon-button" aria-label="Notifications" onClick={() => setNotice('No new mission alerts')}><Glyph>♧</Glyph></button><span className="utc-clock"><i className="dot dot-lime" /> LOCAL SESSION</span><span className="analyst"><b>ANALYST CONSOLE</b><small>Mission workspace</small></span><span className="avatar">OP</span></div>
       </div>
     </header>
 
@@ -87,10 +169,10 @@ export default function App() {
     </aside>
 
     <main className="main-area">
-      {nav === 'New Analysis' ? <ComparisonWorkbench before={before} after={after} previews={previews} result={result} busy={busy} error={error} onRun={submit} onUpload={() => setUploadOpen(true)} onExport={exportReport} /> : nav === 'Intelligence Report' ? <IntelligenceReport before={before} after={after} previews={previews} result={result} onExport={exportReport} onCompare={() => setNav('New Analysis')} onConfigure={() => setPipelineOpen(true)} /> : <>
+      {nav === 'New Analysis' ? <ComparisonWorkbench before={before} after={after} previews={previews} result={result} sampleScenario={sampleScenario} busy={busy} error={error} onRun={submit} onUpload={() => setUploadOpen(true)} onExport={exportReport} onOpenReport={() => setNav('Intelligence Report')} /> : nav === 'Intelligence Report' ? <IntelligenceReport before={before} after={after} previews={previews} result={result} sampleScenario={sampleScenario} report={savedReport} reportBusy={reportBusy} reportError={reportError} onExport={exportReport} onCompare={() => setNav('New Analysis')} onConfigure={() => setPipelineOpen(true)} /> : <>
       <section className="mission-heading">
         <div className="mission-copy"><div className="mission-meta"><span className="chip chip-lime"><i className="dot dot-lime" /> {scenario}</span><span className="coordinates">{previews ? 'CUSTOM INPUT · GEOLOCATION METADATA UNAVAILABLE' : 'LAT: -23.8206° &nbsp;|&nbsp; LON: -68.2396° · SAMPLE'}</span></div><h1>Earth changes. Decoded.</h1><p>Compare satellite and aerial captures, investigate pixel-level changes, and prepare an explainable brief for analyst review.</p></div>
-        <div className="main-actions"><button className="button button-secondary" onClick={() => setPipelineOpen(true)}><Glyph>☷</Glyph> Configure AI Pipeline</button><button className="button button-secondary" onClick={exportReport}><Glyph>⇩</Glyph> Export Report</button><button className="button button-primary" onClick={submit} disabled={busy}><Glyph>⊞</Glyph> {busy ? 'Analyzing…' : 'Run Change Detection'} <small>LOCAL CV</small></button></div>
+        <div className="main-actions"><button className="button button-secondary" onClick={() => setPipelineOpen(true)}><Glyph>☷</Glyph> Configure AI Pipeline</button><button className="button button-secondary" onClick={exportReport} disabled={!result}><Glyph>⇩</Glyph> Export Report</button><button className="button button-primary" onClick={submit} disabled={busy}><Glyph>⊞</Glyph> {busy ? 'Analyzing…' : 'Run Change Detection'} <small>LOCAL CV</small></button></div>
       </section>
       {notice && <div className="notice" role="status"><span>{notice}</span><button onClick={() => setNotice('')} aria-label="Dismiss">×</button></div>}
 
@@ -99,7 +181,7 @@ export default function App() {
           <div className="toolbar-row"><div className="segmented">{['Dual-View', 'Difference Map', 'Vector Polygons', 'Swipe Slider'].map(item => <button key={item} className={mode === item ? 'selected' : ''} onClick={() => setMode(item)}>{item}</button>)}</div><div className="viewer-actions">{mode === 'Swipe Slider' && previews && <><span className="spectral-label">SWIPE</span><input aria-label="Swipe comparison position" type="range" min="5" max="95" value={swipe} onChange={e => setSwipe(Number(e.target.value))} /><span className="gain-value">{swipe}%</span></>}<span className="spectral-label">ANOMALY GAIN</span><input aria-label="Anomaly gain" type="range" min="0" max="100" value={gain} onChange={e => setGain(Number(e.target.value))} /><span className="gain-value">{(gain / 100).toFixed(2)}σ</span><button className={`icon-button ${gridOn ? 'icon-active' : ''}`} title="Toggle reticle grid" onClick={() => setGridOn(!gridOn)}><Glyph>▦</Glyph></button><button className="icon-button" title="Recenter target" onClick={() => setNotice('View centered on target REG-094-ALPHA')}><Glyph>◎</Glyph></button><button className="icon-button" title="Fullscreen canvas" onClick={() => document.querySelector('.map-viewport')?.requestFullscreen?.()}><Glyph>⛶</Glyph></button></div></div>
           <div className="toolbar-row second-row"><div className="spectral-switch"><b>SPECTRAL:</b>{['True Color (RGB)', 'NIR / SWIR False', 'NDVI'].map(item => <button key={item} className={spectral === item ? 'selected' : ''} disabled={Boolean(previews && item !== 'True Color (RGB)')} title={previews && item !== 'True Color (RGB)' ? 'RGB uploads do not contain these spectral bands' : undefined} onClick={() => setSpectral(item)}>{item}</button>)}</div><span className="map-source">{previews ? 'USER UPLOADS · RGB PREVIEW' : 'SAMPLE · SENTINEL-2C / WORLDVIEW-3'}</span></div>
         </div>
-        <div className={`map-viewport mode-${mode.toLowerCase().replaceAll(' ', '-')} spectral-${spectral.startsWith('NIR') ? 'nir' : spectral === 'NDVI' ? 'ndvi' : 'rgb'} ${gridOn ? 'grid-on' : ''} ${previews ? 'uploaded-scene' : ''}`}>
+        <div className={`map-viewport mode-${mode.toLowerCase().replace(/ /g, '-')} spectral-${spectral.startsWith('NIR') ? 'nir' : spectral === 'NDVI' ? 'ndvi' : 'rgb'} ${gridOn ? 'grid-on' : ''} ${previews ? 'uploaded-scene' : ''}`}>
           {previews ? mode === 'Swipe Slider' ? <div className="uploaded-swipe"><img src={previews.before} alt={`Baseline image: ${before?.name ?? ''}`} /><div className="swipe-after" style={{ clipPath: `inset(0 0 0 ${swipe}%)` }}><img src={previews.after} alt={`Latest image: ${after?.name ?? ''}`} /></div><span className="uploaded-divider" style={{ left: `${swipe}%` }} /></div> : <div className="uploaded-pair"><div><img src={previews.before} alt={`Baseline image: ${before?.name ?? ''}`} /></div><div><img src={previews.after} alt={`Latest image: ${after?.name ?? ''}`} /></div><span className="uploaded-divider" /></div> : <img src="/samples/atacama-comparison.png" alt="Atacama salt basin sample comparison with marked candidate regions" />}
           <div className="map-caption caption-left"><i className="dot dot-sage" /><div><b>T0: BASELINE ACQUISITION</b><small>{previews ? before?.name : '2024-04-12 09:24:18 UTC · SENTINEL-2C (MSI 10m GSD)'}</small></div></div>
           <div className="map-caption caption-right"><i className="dot dot-coral" /><div><b>T1: {previews ? 'LATEST IMAGE' : 'SAMPLE OBSERVATION'}</b><small>{previews ? after?.name : '2024-10-28 09:18:02 UTC · WORLDVIEW-3 (0.3m RESAMPLED)'}</small></div>{!previews && <em>Δ 18D</em>}</div>
@@ -112,7 +194,7 @@ export default function App() {
       </section>
 
       <section className="metrics-grid" aria-label="Analysis metrics">
-        <article className="metric-card"><div className="metric-label">CHANGED PIXELS <Glyph>⌁</Glyph></div><div className="metric-value lime">{changed.toFixed(2)}% <small>{result ? 'measured' : 'sample scene'}</small></div><div className="metric-foot"><span>{result ? `${result.changed_pixels.toLocaleString()} pixels above threshold` : 'Atacama demo comparison'}</span><span>{result ? `${result.total_pixels.toLocaleString()} total` : 'illustrative values'}</span></div></article>
+        <article className="metric-card"><div className="metric-label">CHANGED PIXELS <Glyph>⌁</Glyph></div><div className="metric-value lime">{result ? `${changed!.toFixed(2)}%` : '—'} <small>{result ? 'measured' : 'awaiting analysis'}</small></div><div className="metric-foot"><span>{result ? `${result.changed_pixels.toLocaleString()} pixels above threshold` : 'Run analysis to measure'}</span><span>{result ? `${result.total_pixels.toLocaleString()} total` : 'No result yet'}</span></div></article>
         <article className="metric-card"><div className="metric-label">CANDIDATE REGIONS <Glyph>◉</Glyph></div><div className="severity-pills">{result ? <><b>{count} CANDIDATE</b><span>CAUSE UNASSESSED</span></> : <><b>3 HIGH</b><span>4 MOD</span><span>2 LOW</span></>}</div><div className="metric-foot"><span>{result ? `${count} connected regions` : '9 illustrative clusters'}</span><span>{result ? 'Thresholded pixels' : 'Sample triage'}</span></div></article>
         <article className="metric-card"><div className="metric-label">IMAGE DIMENSIONS <Glyph>◎</Glyph></div><div className="metric-value">{result ? 'RESIZED' : 'SAMPLE'} <small className="lock-tag">LOCAL</small></div><div className="metric-foot"><span>Pixel dimensions aligned</span><span>No GCP<br />registration</span></div></article>
         <article className="metric-card"><div className="metric-label">VISION MODEL <Glyph>ϟ</Glyph></div><div className="metric-value lime">OPTIONAL</div><div className="metric-foot"><span>Local CV path<br />available</span><span>Provider<br />not configured</span></div></article>
@@ -123,14 +205,14 @@ export default function App() {
           <div className="target-list">{displayedTargets.map(target => <article key={target.id} className={`target-row ${target.tone}`}><div className="target-top"><span className={`severity-tag ${target.tone}`}>{target.severity} // {target.id}</span><span className="confidence">{target.confidence} <small>{result ? 'Model confidence unavailable' : 'Sample confidence'}</small></span><i className={`dot dot-${target.tone === 'critical' ? 'coral' : target.tone === 'moderate' ? 'amber' : 'sage'}`} /></div><h3>{target.title}</h3><div className="target-meta"><span>AREA: <b>{target.area}</b></span><span>·</span><span>{result ? 'COORDS: UNAVAILABLE · NO GEOLOCATION METADATA' : 'COORDS: -23.8214°, -68.2391° · SAMPLE'}</span></div><div className="target-bottom"><span>STATUS: {target.status}</span><div><button className="mini-button" onClick={() => setNotice(`Reviewing ${target.id} · inspect source imagery and metadata`)}><Glyph>⌕</Glyph> Inspect</button>{result ? <button className="mini-button" onClick={() => setResult(null)}>Clear result</button> : <button className="mini-button" onClick={() => closeTarget(target.id)}>{target.tone === 'low' ? 'Archive' : 'Dismiss'}</button>}</div></div></article>)}</div>
         </article>
 
-        <article className="panel assessment-panel"><header className="panel-header"><h2><Glyph>♧</Glyph> Change Interpretation</h2><span className="chip chip-lime">LOCAL CV MODE</span></header><div className="assessment-body"><div className="conclusion"><span className="section-label">SYNTHESIS CONCLUSION</span><h3>{result ? 'Image change signal for analyst review' : 'Atacama sample · candidate surface change'}</h3><p>{result ? result.summary : 'The illustrative sample marks candidate change areas in a salt basin. This dashboard uses local pixel comparison; confirm image alignment and context before interpreting the cause.'}</p></div><div className="section-label evidence-title">OBSERVED IMAGE EVIDENCE</div><div className="evidence-item"><i className="evidence-icon coral">≈</i><p><b>Pixel Difference:</b> {result ? 'Pixels above the backend threshold are included in this change summary.' : 'The sample marks a visible reflectance difference for demonstration.'}</p></div><div className="evidence-item"><i className="evidence-icon sage">⌁</i><p><b>Region Grouping:</b> {result ? `${result.changed_regions} connected candidate regions` : 'Nine illustrative clusters'} flagged for visual inspection.</p></div><div className="evidence-item"><i className="evidence-icon amber">◷</i><p><b>Temporal Context:</b> Sample dates and sensor details are illustrative; uploaded images do not include this context.</p></div><div className="section-label hypothesis-title">FOLLOW-UP CHECKS</div><div className="hypothesis"><div><span>Geospatial co-registration</span><b className="sage-text">REQUIRED</b></div><div className="progress-track"><i style={{ width: '68%' }} /></div><small>Current prototype resizes images; it does not register geographic coordinates.</small></div><div className="hypothesis"><div><span>Cause classification</span><b className="amber-text">UNRESOLVED</b></div><div className="progress-track amber-track"><i style={{ width: '34%' }} /></div><small>Pixel change alone cannot distinguish natural and human activity.</small></div><button className="dossier-button" onClick={exportReport}><Glyph>▤</Glyph><span>Export change summary<br /><small>JSON · Analyst review</small></span><b>→</b></button></div></article>
+        <article className="panel assessment-panel"><header className="panel-header"><h2><Glyph>♧</Glyph> Change Interpretation</h2><span className="chip chip-lime">LOCAL CV MODE</span></header><div className="assessment-body"><div className="conclusion"><span className="section-label">SYNTHESIS CONCLUSION</span><h3>{result ? 'Image change signal for analyst review' : 'Atacama sample · candidate surface change'}</h3><p>{result ? result.summary : 'The illustrative sample marks candidate change areas in a salt basin. This dashboard uses local pixel comparison; confirm image alignment and context before interpreting the cause.'}</p></div><div className="section-label evidence-title">OBSERVED IMAGE EVIDENCE</div><div className="evidence-item"><i className="evidence-icon coral">≈</i><p><b>Pixel Difference:</b> {result ? 'Pixels above the backend threshold are included in this change summary.' : 'The sample marks a visible reflectance difference for demonstration.'}</p></div><div className="evidence-item"><i className="evidence-icon sage">⌁</i><p><b>Region Grouping:</b> {result ? `${result.changed_regions} connected candidate regions` : 'Nine illustrative clusters'} flagged for visual inspection.</p></div><div className="evidence-item"><i className="evidence-icon amber">◷</i><p><b>Temporal Context:</b> Sample dates and sensor details are illustrative; uploaded images do not include this context.</p></div><div className="section-label hypothesis-title">FOLLOW-UP CHECKS</div><div className="hypothesis"><div><span>Geospatial co-registration</span><b className="sage-text">REQUIRED</b></div><div className="progress-track"><i style={{ width: '68%' }} /></div><small>Current prototype resizes images; it does not register geographic coordinates.</small></div><div className="hypothesis"><div><span>Cause classification</span><b className="amber-text">UNRESOLVED</b></div><div className="progress-track amber-track"><i style={{ width: '34%' }} /></div><small>Pixel change alone cannot distinguish natural and human activity.</small></div><button className="dossier-button" onClick={exportReport} disabled={!result}><Glyph>▤</Glyph><span>Export change summary<br /><small>JSON · Analyst review</small></span><b>→</b></button></div></article>
       </section>
 
       {error && <div className="toast error-toast" role="alert">{error}<button onClick={() => setError('')}>×</button></div>}
       </>}
     </main>
 
-    {uploadOpen && <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) setUploadOpen(false) }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="upload-title"><header><div><span className="section-label">NEW MISSION ANALYSIS</span><h2 id="upload-title">Add acquisition pair</h2></div><button className="icon-button" onClick={() => setUploadOpen(false)} aria-label="Close">×</button></header><p className="modal-copy">Select baseline and latest captures. The local CV pipeline compares them without an external AI service.</p><div className="file-slots">{[{ label: 'T0 / BASELINE CAPTURE', file: before, set: setBefore }, { label: 'T1 / LATEST CAPTURE', file: after, set: setAfter }].map(slot => <label key={slot.label} className="file-slot"><span className="section-label">{slot.label}</span><span className="file-plus">＋</span><b>{slot.file?.name ?? 'Choose image'}</b><small>PNG, JPEG, or WebP · up to 20 MB</small><input type="file" accept="image/png,image/jpeg,image/webp" onChange={e => slot.set(e.target.files?.[0] ?? null)} /></label>)}</div>{error && <p className="modal-error" role="alert">{error}</p>}<footer><span>Images remain on this local workstation.</span><button className="button button-primary" onClick={submit} disabled={!before || !after || busy}>{busy ? 'Analyzing…' : 'Run local comparison →'}</button></footer></section></div>}
+    {uploadOpen && <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) setUploadOpen(false) }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="upload-title"><header><div><span className="section-label">NEW MISSION ANALYSIS</span><h2 id="upload-title">Add acquisition pair</h2></div><button className="icon-button" onClick={() => setUploadOpen(false)} aria-label="Close">×</button></header><p className="modal-copy">Select baseline and latest captures. Local CV remains available if the optional AI provider is offline.</p><div className="file-slots">{[{ label: 'T0 / BASELINE CAPTURE', file: before, set: setBefore }, { label: 'T1 / LATEST CAPTURE', file: after, set: setAfter }].map((slot, index) => <label key={slot.label} className="file-slot"><span className="section-label">{slot.label}</span><span className="file-plus">＋</span><b>{slot.file?.name ?? 'Choose image'}</b><small>PNG, JPEG, or WebP · up to {Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)} MB</small><input type="file" accept="image/png,image/jpeg,image/webp" onChange={e => selectImage(e.target.files?.[0], index === 0 ? setBefore : setAfter)} /></label>)}</div><div className="metadata-fields"><label>LOCATION (OPTIONAL)<input value={location} maxLength={200} placeholder="Area of interest" onChange={e => setLocation(e.target.value)} /></label><label>T0 DATE<input type="date" value={beforeDate} onChange={e => setBeforeDate(e.target.value)} /></label><label>T1 DATE<input type="date" value={afterDate} onChange={e => setAfterDate(e.target.value)} /></label></div><div className="server-samples"><b>SYNTHETIC DEMO PAIRS · NOT SATELLITE OBSERVATIONS</b>{samples.length ? samples.map(sample => <article key={sample.id} className="sample-scenario"><div><span className="chip chip-lime">{sample.category}</span><b>{sample.title}</b><p>{sample.description}</p><small>EXPECTED SIGNAL: {sample.expected_change}</small></div><button className="mini-button" onClick={() => void useServerSamplePair(sample)}>Load image pair</button></article>) : <small>{sampleError || 'No demo scenarios are currently available from the backend.'}</small>}</div>{error && <p className="modal-error" role="alert">{error}</p>}<footer><span>{apiStatus === 'online' ? 'FastAPI connected · files are processed locally' : 'FastAPI unavailable · start backend to analyze'}</span><button className="button button-primary" onClick={submit} disabled={!before || !after || busy || apiStatus !== 'online'}>{busy ? 'Analyzing…' : 'Analyze Changes →'}</button></footer></section></div>}
 
     {pipelineOpen && <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) setPipelineOpen(false) }}><section className="modal pipeline-modal" role="dialog" aria-modal="true" aria-labelledby="pipeline-title"><header><div><span className="section-label">PROCESSING CONFIGURATION</span><h2 id="pipeline-title">AI pipeline</h2></div><button className="icon-button" onClick={() => setPipelineOpen(false)} aria-label="Close">×</button></header><div className="pipeline-setting"><div><b>Local image comparison</b><span>OpenCV absolute difference · always available</span></div><span className="chip chip-lime">ACTIVE</span></div><div className="pipeline-setting"><div><b>Vision model provider</b><span>External provider is not configured</span></div><span className="chip">DISABLED</span></div><div className="pipeline-setting"><div><b>Anomaly gain threshold</b><span>Adjust sensitivity of changed pixel detection</span></div><input type="range" min="0" max="100" value={gain} onChange={e => setGain(Number(e.target.value))} /></div><p className="modal-copy">Current backend uses a fixed pixel threshold. Gain is a dashboard control for this prototype; provider analysis and causal classification are not enabled.</p><footer><span>Configuration is local to this session.</span><button className="button button-primary" onClick={() => setPipelineOpen(false)}>Done</button></footer></section></div>}
   </div>
@@ -141,11 +223,13 @@ type WorkbenchProps = {
   after: File | null
   previews: { before: string; after: string } | null
   result: AnalysisResult | null
+  sampleScenario: SampleScenario | null
   busy: boolean
   error: string
   onRun: () => void | Promise<void>
   onUpload: () => void
   onExport: () => void
+  onOpenReport: () => void
 }
 
 const sampleRegions = [
@@ -155,14 +239,15 @@ const sampleRegions = [
   { id: 'REG-04', name: 'Shadow Flux', confidence: '64.2%', severity: 'LOW', area: '0.14 km²' },
 ]
 
-function ComparisonWorkbench({ before, after, previews, result, busy, error, onRun, onUpload, onExport }: WorkbenchProps) {
+function ComparisonWorkbench({ before, after, previews, result, sampleScenario, busy, error, onRun, onUpload, onExport, onOpenReport }: WorkbenchProps) {
   const [view, setView] = useState('Dual-Swipe')
   const [swipe, setSwipe] = useState(50)
   const [zoom, setZoom] = useState(1)
   const [blinkAfter, setBlinkAfter] = useState(false)
-  const [selected, setSelected] = useState('REG-01')
+  const [selected, setSelected] = useState('')
   const [notice, setNotice] = useState('')
   const region = sampleRegions.find(item => item.id === selected) ?? sampleRegions[0]
+  const selectedRegion = result?.regions.find(item => item.id === selected) ?? result?.regions[0]
 
   useEffect(() => {
     if (view !== 'Blink' || !previews) { setBlinkAfter(false); return }
@@ -173,26 +258,28 @@ function ComparisonWorkbench({ before, after, previews, result, busy, error, onR
   const openComparison = () => {
     if (view === 'Blink' && previews) return <img className="workbench-sample" src={blinkAfter ? previews.after : previews.before} alt={blinkAfter ? 'Latest uploaded image' : 'Baseline uploaded image'} />
     if (previews && view === 'Dual-Swipe') return <div className="workbench-swipe"><img className="workbench-before" src={previews.before} alt={`Baseline image ${before?.name ?? ''}`} /><div className="workbench-after" style={{ clipPath: `inset(0 0 0 ${swipe}%)` }}><img src={previews.after} alt={`Latest image ${after?.name ?? ''}`} /></div><span className="workbench-divider" style={{ left: `${swipe}%` }} /></div>
+    if (result && (view === 'Diff Heatmap' || view === 'Vector Overlay')) return <img className="workbench-sample" src={apiUrl(result.annotated_image_url)} alt="Backend annotated image with detected change regions" />
     if (previews) return <div className="workbench-pair"><div><img src={previews.before} alt={`Baseline image ${before?.name ?? ''}`} /></div><div><img src={previews.after} alt={`Latest image ${after?.name ?? ''}`} /></div></div>
     return <img className="workbench-sample" src="/samples/atacama-workbench.png" alt="Illustrative Atacama satellite comparison with sample change regions" />
   }
 
   return <div className="comparison-workbench">
-    <div className="workbench-topline"><div><span className="section-label">{previews ? 'CUSTOM IMAGE PAIR' : 'AOI-8492 / SAMPLE SCENARIO'}</span><b>{previews ? 'LOCAL IMAGE COMPARISON' : 'SALAR DE ATACAMA · LITHIUM EVAPORATION SECTOR 4'}</b></div><div className="workbench-synthesis"><span>{previews ? 'RGB INPUTS · GEOLOCATION UNKNOWN' : 'SAMPLE BAND SYNTHESIS · RGB / SWIR COMPOSITE'}</span><b className="cv-status"><i className="dot dot-sage" /> LOCAL CV {result ? 'COMPLETE' : 'READY'}</b></div></div>
+    <div className="workbench-topline"><div><span className="section-label">{sampleScenario ? `SYNTHETIC DEMO · ${sampleScenario.category}` : previews ? 'CUSTOM IMAGE PAIR' : 'AOI-8492 / SAMPLE SCENARIO'}</span><b>{sampleScenario ? sampleScenario.title : previews ? 'LOCAL IMAGE COMPARISON' : 'SALAR DE ATACAMA · LITHIUM EVAPORATION SECTOR 4'}</b></div><div className="workbench-synthesis"><span>{sampleScenario ? 'COMPUTER-GENERATED · NOT SATELLITE OBSERVATION' : previews ? 'RGB INPUTS · GEOLOCATION UNKNOWN' : 'SAMPLE BAND SYNTHESIS · RGB / SWIR COMPOSITE'}</span><b className="cv-status"><i className="dot dot-sage" /> LOCAL CV {result ? 'COMPLETE' : 'READY'}</b></div></div>
     <div className="workbench-modebar"><div className="mode-tabs">{['Dual-Swipe', 'Diff Heatmap', 'Vector Overlay', 'Blink'].map(item => <button key={item} className={view === item ? 'selected' : ''} onClick={() => setView(item)}>{item}</button>)}</div><div className="modebar-right">{view === 'Dual-Swipe' && previews && <label className="swipe-control">SWIPE <input aria-label="Image reveal position" type="range" min="5" max="95" value={swipe} onChange={e => setSwipe(Number(e.target.value))} /> {swipe}%</label>}<button className="button button-primary workbench-run" onClick={onRun} disabled={busy}>{busy ? 'Analyzing…' : result ? 'Run Again' : 'Run Change Detection'}</button></div></div>
 
     <div className="comparison-layout">
-      <section className={`comparison-view view-${view.toLowerCase().replaceAll(' ', '-')} ${previews ? 'has-uploads' : 'sample-view'}`}>
+      <section className={`comparison-view view-${view.toLowerCase().replace(/ /g, '-')} ${previews ? 'has-uploads' : 'sample-view'}`}>
         <div className="compare-canvas"><div className="compare-art" style={{ transform: `scale(${zoom})` }}>{openComparison()}</div>
           <div className="capture-label capture-before"><i className="dot dot-sage" /><div><b>T0 · BEFORE CAPTURE</b><small>{previews ? before?.name : '2024-04-12 09:14 UTC · SENTINEL-2C · SAMPLE'}</small></div></div>
           <div className="capture-label capture-after"><i className="dot dot-lime" /><div><b>T1 · AFTER CAPTURE</b><small>{previews ? after?.name : '2024-10-28 10:22 UTC · WORLDVIEW-3 · SAMPLE'}</small></div></div>
-          {view === 'Diff Heatmap' && <div className="map-mode-note">{result ? 'METRICS AVAILABLE · SPATIAL MASK NOT RETURNED BY API' : 'ILLUSTRATIVE SAMPLE HEATMAP VIEW'}</div>}
+          {result && selectedRegion && previews && (view === 'Dual-Swipe' || view === 'Vector Overlay') && <div className="selected-region-box" aria-label={`Selected region ${selectedRegion.id}`} style={{ left: `${(view === 'Dual-Swipe' ? 50 + selectedRegion.x / result.image_width * 50 : selectedRegion.x / result.image_width * 100)}%`, top: `${selectedRegion.y / result.image_height * 100}%`, width: `${selectedRegion.width / result.image_width * (view === 'Dual-Swipe' ? 50 : 100)}%`, height: `${selectedRegion.height / result.image_height * 100}%` }}><b>{selectedRegion.id}</b></div>}
+          {view === 'Diff Heatmap' && <div className="map-mode-note">{result ? 'BACKEND ANNOTATION · RED PIXEL DELTA' : 'ILLUSTRATIVE SAMPLE HEATMAP VIEW'}</div>}
           {view === 'Vector Overlay' && <div className="map-mode-note">{previews ? 'VECTOR OUTPUT NEEDS GEOREFERENCED IMAGERY' : 'SAMPLE VECTOR ANNOTATIONS · NOT COMPUTED FROM UPLOADS'}</div>}
           {view === 'Blink' && previews && <div className="blink-indicator">BLINK · {blinkAfter ? 'T1' : 'T0'}</div>}
           {!previews && <div className="canvas-coordinates">23°49′14.28″S&nbsp; 68°14′22.04″W · 2,341m ELEV · SAMPLE</div>}
           <div className="canvas-zoom"><button aria-label="Zoom in" onClick={() => setZoom(value => Math.min(1.6, value + .1))}>＋</button><button aria-label="Zoom out" onClick={() => setZoom(value => Math.max(1, value - .1))}>−</button><span>{Math.round(zoom * 100)}%</span><button aria-label="Reset zoom" onClick={() => setZoom(1)}>⛶</button></div>
         </div>
-        <div className="layer-controls"><span className="layer-heading">DISPLAY LAYERS</span><label title="Bounding boxes are part of the sample scene"><input type="checkbox" checked readOnly disabled /> Bounding Boxes <b>{previews ? 'UNAVAILABLE' : 'SAMPLE'}</b></label><label title="The current API returns summary metrics, not an image mask"><input type="checkbox" disabled /> Change Mask <b>API PENDING</b></label><label><input type="checkbox" disabled /> Contours</label><label><input type="checkbox" disabled /> Thermal IR</label><span className="layer-note">Local API returns pixel metrics; geospatial overlays are not generated.</span></div>
+        <div className="layer-controls"><span className="layer-heading">DISPLAY LAYERS</span><label title="The backend annotation includes detected region boxes"><input type="checkbox" checked readOnly disabled /> Detected Regions <b>{result ? result.regions.length : 'SAMPLE'}</b></label><label title="Red overlay in the annotated result indicates thresholded pixels"><input type="checkbox" checked={Boolean(result)} readOnly disabled /> Pixel Delta <b>{result ? 'BACKEND' : 'AWAITING RUN'}</b></label><label><input type="checkbox" disabled /> Geospatial Contours</label><label><input type="checkbox" disabled /> Thermal IR</label><span className="layer-note">Candidate boxes are pixel coordinates; geographic polygons are not available.</span></div>
         <div className="canvas-status"><span>RGB PREVIEW</span><span>{previews ? 'ACQUISITION METADATA UNAVAILABLE' : 'SAMPLE · CLOUD 0.00% · GSD 0.31m/px'}</span><span className="canvas-status-right">{result ? `${result.changed_percent.toFixed(2)}% PIXEL CHANGE` : 'SAMPLE SCENE'}</span></div>
       </section>
 
@@ -201,6 +288,7 @@ function ComparisonWorkbench({ before, after, previews, result, busy, error, onR
         {result ? <>
           <div className="inspector-title"><small>ANALYSIS · {result.analysis_id.slice(0, 8).toUpperCase()}</small><h2>Change candidates</h2><span className="risk-chip moderate">PIXEL SIGNAL · CAUSE UNASSESSED</span></div>
           <section className="inspector-card"><h3>LOCAL CHANGE METRICS <span>NO GEOREFERENCE</span></h3><div className="inspector-stats"><div><small>PIXELS CHANGED</small><b>{result.changed_pixels.toLocaleString()}</b></div><div><small>IMAGE PIXELS</small><b>{result.total_pixels.toLocaleString()}</b></div><div><small>AREA DELTA</small><b>{result.changed_percent.toFixed(2)}%</b></div><div><small>CONNECTED REGIONS</small><b>{result.changed_regions}</b></div></div></section>
+          <section className="inspector-card"><h3>DETECTED REGIONS <span>{result.regions.length} RETURNED</span></h3>{result.regions.length ? <div className="region-selector">{result.regions.map(item => <button key={item.id} className={(selectedRegion?.id ?? result.regions[0]?.id) === item.id ? 'selected' : ''} onClick={() => setSelected(item.id)}><b>{item.id}</b><span>{item.width} × {item.height} px</span><small>{item.area_pixels.toLocaleString()} px</small></button>)}</div> : <p>No connected region met the backend minimum-area threshold.</p>}</section>
           <section className="inspector-card"><h3>CV SUMMARY</h3><p>{result.summary}</p><small className="inspector-disclaimer">Grayscale absolute difference with a fixed threshold. This result does not classify causes or provide vector polygons.</small></section>
         </> : <>
           <div className="inspector-title"><small>{region.id} · SELECTED SAMPLE REGION</small><h2>{region.name}</h2><span className="risk-chip critical"><i className="dot dot-coral" /> SAMPLE CRITICAL HAZARD <b>{region.confidence} SAMPLE</b></span></div>
@@ -209,7 +297,7 @@ function ComparisonWorkbench({ before, after, previews, result, busy, error, onR
           <section className="inspector-card spectrum-card"><h3>SPECTRAL SHIFT <span>SAMPLE ONLY</span></h3><svg viewBox="0 0 260 56" role="img" aria-label="Illustrative spectral shift chart"><path d="M3 12 C42 18 58 40 91 33 S142 10 174 21 S218 44 257 38"/><path className="spectral-secondary" d="M3 28 C43 14 66 17 94 24 S139 46 175 29 S225 18 257 24"/><circle cx="92" cy="33" r="3"/><circle cx="175" cy="29" r="3"/></svg><div className="band-legend"><span>B02 <b>0.49μm</b></span><span>B08A <b>0.86μm</b></span><span>SWIR-2 <b>2.20μm</b></span></div><p>Spectral values are illustrative only; the local upload path compares RGB image pixels.</p></section>
           <section className="inspector-card observation-card"><h3>LOCAL CV OBSERVATIONS</h3><p><b>Thresholded pixel change:</b> Candidate regions are based on local RGB difference, not a trained event classifier.</p><p><b>Cause assessment:</b> Natural versus human-made activity remains unresolved.</p></section>
         </>}
-        <div className="inspector-actions"><button className="button button-primary" onClick={onRun} disabled={busy}>{busy ? 'Analyzing…' : previews ? 'Run Local Comparison' : 'Add Images to Analyze'}</button><button className="button button-secondary" onClick={onUpload}><Glyph>＋</Glyph> Choose Image Pair</button><button className="button button-secondary" onClick={onExport}><Glyph>⇩</Glyph> Export JSON</button><button className="button button-secondary" onClick={() => setNotice('Geospatial export is unavailable until image registration is implemented.')}><Glyph>⌖</Glyph> Geospatial Export <small>Unavailable</small></button></div>
+        <div className="inspector-actions"><button className="button button-primary" onClick={onRun} disabled={busy}>{busy ? 'Analyzing…' : previews ? 'Analyze Changes' : 'Add Images to Analyze'}</button><button className="button button-secondary" onClick={onUpload}><Glyph>＋</Glyph> Choose Image Pair</button>{result && <button className="button button-secondary" onClick={onOpenReport}><Glyph>▤</Glyph> Open Intelligence Report</button>}<button className="button button-secondary" onClick={onExport} disabled={!result}><Glyph>⇩</Glyph> Export JSON</button><button className="button button-secondary" onClick={() => setNotice('Geospatial export is unavailable until image registration is implemented.')}><Glyph>⌖</Glyph> Geospatial Export <small>Unavailable</small></button></div>
         {notice && <p className="inspector-notice" role="status">{notice}</p>}
       </aside>
     </div>
@@ -222,34 +310,41 @@ type ReportProps = {
   after: File | null
   previews: { before: string; after: string } | null
   result: AnalysisResult | null
+  sampleScenario: SampleScenario | null
   onExport: () => void
   onCompare: () => void
   onConfigure: () => void
+  report: AnalysisResult | null
+  reportBusy: boolean
+  reportError: string
 }
 
-function IntelligenceReport({ before, after, previews, result, onExport, onCompare, onConfigure }: ReportProps) {
+function IntelligenceReport({ before, after, previews, result, sampleScenario, report, reportBusy, reportError, onExport, onCompare, onConfigure }: ReportProps) {
+  result = report ?? result
   const [reviewed, setReviewed] = useState(false)
   const now = new Date()
   const generated = `${now.toISOString().slice(0, 10)} · ON DEMAND`
   const isSample = !result && !previews
 
   return <div className="report-page">
-    <div className="report-security"><span><i className="dot dot-lime" /> {result ? 'LOCAL CV RESULT' : previews ? 'INPUT PAIR · ANALYSIS PENDING' : 'REFERENCE SAMPLE'}</span><span>{result || previews ? 'AI INFERENCE NOT CONFIGURED' : 'ILLUSTRATIVE CONTENT · NOT A GENERATED REPORT'}</span><span className="report-integrity">● LOCAL WORKSTATION</span></div>
+    {reportBusy && <div className="notice" role="status">Retrieving saved intelligence report…</div>}{reportError && <div className="notice error-toast" role="alert">Saved report unavailable: {reportError}. Showing the verified analysis result.</div>}
+    <div className="report-security"><span><i className="dot dot-lime" /> {sampleScenario ? 'SYNTHETIC DEMO · LOCAL CV RESULT' : result ? 'LOCAL CV RESULT' : previews ? 'INPUT PAIR · ANALYSIS PENDING' : 'REFERENCE SAMPLE'}</span><span>{result?.ai_analysis ? 'VISION MODEL ASSESSMENT INCLUDED' : result || previews ? 'AI INFERENCE NOT CONFIGURED' : 'ILLUSTRATIVE CONTENT · NOT A GENERATED REPORT'}</span><span className="report-integrity">● LOCAL WORKSTATION</span></div>
+    {sampleScenario && <div className="synthetic-report-banner"><b>COMPUTER-GENERATED DEMO · NOT A SATELLITE OBSERVATION</b><span>{sampleScenario.title}: {sampleScenario.description}</span><small>EXPECTED SIGNAL: {sampleScenario.expected_change}</small></div>}
     <div className="report-breadcrumb">Analysis History <i>/</i> {result ? result.analysis_id.toUpperCase() : previews ? 'CUSTOM-IMAGE-PAIR' : 'ATACAMA-SALAR-094'} <i>/</i> <b>Intelligence Report</b></div>
     <header className="report-titlebar"><div><span className="section-label">IMAGE CHANGE DOSSIER · {result ? 'LOCAL RESULT' : previews ? 'ANALYSIS PENDING' : 'SAMPLE TEMPLATE'}</span><h1>{result ? `IR-${result.analysis_id.slice(0, 12).toUpperCase()}` : previews ? 'DRAFT-UNANALYZED' : 'DRAFT-SALAR-094'}</h1><div className="report-meta"><span>GENERATED: {generated}</span><span>AOI: {previews ? 'User image pair · location unavailable' : 'Salar de Atacama · SAMPLE'}</span></div></div><div className="report-actions"><button className="button button-secondary" onClick={onCompare}><Glyph>◫</Glyph> View Comparison</button><button className="button button-secondary" onClick={() => window.print()}><Glyph>▧</Glyph> Print Report</button><button className="button button-primary" onClick={onExport}><Glyph>⇩</Glyph> Export JSON</button></div></header>
 
-    <section className="report-hero"><div className="report-hero-copy"><div className="report-incident-tags"><span className={`severity-tag ${result ? 'moderate' : isSample ? 'low' : 'elevated'}`}>{result ? 'ANALYST REVIEW' : isSample ? 'SAMPLE ONLY' : 'INPUT PAIR'}</span><span className="chip">PIXEL-LEVEL CHANGE DETECTION</span><span className="report-trigger">{result ? 'LOCAL CV · OPENCV' : previews ? 'CUSTOM IMAGES · NOT YET ANALYZED' : 'ATACAMA REFERENCE SCENARIO'}</span></div><h2>{result ? 'Image change signal requires analyst review' : previews ? 'Image pair ready for local analysis' : 'Atacama salt basin · illustrative change report'}</h2><div className="epistemic-callout"><Glyph>ⓘ</Glyph><span>{result ? 'OBSERVED: thresholded pixel differences. CAUSE ATTRIBUTION: NOT GENERATED. No external AI provider is configured.' : previews ? 'INPUTS SELECTED, BUT NOT ANALYZED. Run the local comparison to generate measured pixel metrics. No AI provider is configured.' : 'REFERENCE ONLY: the screenshot scenario contains illustrative claims and values. They are not results from OrbitalPulse.'}</span></div><p>{result ? result.summary : previews ? 'This pair is ready. Open Image Comparison and run local analysis to replace the pending report with measured pixel-change metrics.' : 'This sample dossier demonstrates the report layout. Upload a baseline and latest image, then run local comparison to replace this sample with measured pixel metrics.'}</p><p className="report-scope">The current pipeline does not georegister imagery, identify physical area, confirm sensor bands, or classify changes as natural or human-made.</p></div><div className="report-hero-stats">{result ? <><div><span>PIXEL CHANGE</span><b>{result.changed_percent.toFixed(2)}<small>%</small></b><i><em style={{ width: `${Math.min(result.changed_percent, 100)}%` }} /></i><small>{result.changed_pixels.toLocaleString()} of {result.total_pixels.toLocaleString()} pixels</small></div><div><span>CONNECTED REGIONS</span><b>{result.changed_regions}</b><small>Components with 16+ pixels</small></div></> : previews ? <><div><span>PIXEL CHANGE</span><b>—</b><i><em style={{ width: '0%' }} /></i><small>Run comparison to measure</small></div><div><span>CONNECTED REGIONS</span><b>—</b><small>Analysis pending</small></div></> : <><div><span>REFERENCE DELTA</span><b>+14.82<small>%</small></b><i><em style={{ width: '62%' }} /></i><small>Illustrative value · not measured</small></div><div><span>AI CONFIDENCE</span><b>—</b><small>Provider not configured</small></div></>}<div className="hero-status"><span>REPORT STATE</span><b>{reviewed ? 'REVIEWED LOCALLY' : 'DRAFT · REVIEW REQUIRED'}</b></div></div></section>
+    <section className="report-hero"><div className="report-hero-copy"><div className="report-incident-tags"><span className={`severity-tag ${result ? 'moderate' : isSample ? 'low' : 'elevated'}`}>{result ? 'ANALYST REVIEW' : isSample ? 'SAMPLE ONLY' : 'INPUT PAIR'}</span><span className="chip">PIXEL-LEVEL CHANGE DETECTION</span><span className="report-trigger">{sampleScenario ? `SYNTHETIC · ${sampleScenario.category}` : result ? 'LOCAL CV · OPENCV' : previews ? 'CUSTOM IMAGES · NOT YET ANALYZED' : 'ATACAMA REFERENCE SCENARIO'}</span></div><h2>{result ? 'Image change signal requires analyst review' : previews ? 'Image pair ready for local analysis' : 'Atacama salt basin · illustrative change report'}</h2><div className="epistemic-callout"><Glyph>ⓘ</Glyph><span>{result ? 'OBSERVED: thresholded pixel differences. CAUSE ATTRIBUTION: NOT GENERATED. No external AI provider is configured.' : previews ? 'INPUTS SELECTED, BUT NOT ANALYZED. Run the local comparison to generate measured pixel metrics. No AI provider is configured.' : 'REFERENCE ONLY: the screenshot scenario contains illustrative claims and values. They are not results from OrbitalPulse.'}</span></div><p>{result ? result.summary : previews ? 'This pair is ready. Open Image Comparison and run local analysis to replace the pending report with measured pixel-change metrics.' : 'This sample dossier demonstrates the report layout. Upload a baseline and latest image, then run local comparison to replace this sample with measured pixel metrics.'}</p><p className="report-scope">The current pipeline does not georegister imagery, identify physical area, confirm sensor bands, or classify changes as natural or human-made.</p></div><div className="report-hero-stats">{result ? <><div><span>PIXEL CHANGE</span><b>{result.changed_percent.toFixed(2)}<small>%</small></b><i><em style={{ width: `${Math.min(result.changed_percent, 100)}%` }} /></i><small>{result.changed_pixels.toLocaleString()} of {result.total_pixels.toLocaleString()} pixels</small></div><div><span>CONNECTED REGIONS</span><b>{result.changed_regions}</b><small>Components with 16+ pixels</small></div></> : previews ? <><div><span>PIXEL CHANGE</span><b>—</b><i><em style={{ width: '0%' }} /></i><small>Run comparison to measure</small></div><div><span>CONNECTED REGIONS</span><b>—</b><small>Analysis pending</small></div></> : <><div><span>REFERENCE DELTA</span><b>+14.82<small>%</small></b><i><em style={{ width: '62%' }} /></i><small>Illustrative value · not measured</small></div><div><span>AI CONFIDENCE</span><b>—</b><small>Provider not configured</small></div></>}<div className="hero-status"><span>REPORT STATE</span><b>{reviewed ? 'REVIEWED LOCALLY' : 'DRAFT · REVIEW REQUIRED'}</b></div></div></section>
 
-    <section className="report-comparison panel"><header className="panel-header"><h2><Glyph>▧</Glyph> Image Evidence &amp; CV Summary</h2><span className="chip">{result || previews ? 'UPLOADED IMAGE PAIR' : 'REFERENCE SAMPLE'}</span><span className="report-panel-meta">{previews ? 'RGB INPUTS · NO GEOLOCATION' : 'SAMPLE SENSOR METADATA · UNVERIFIED'}</span></header><div className="evidence-triptych">
+    <section className="report-comparison panel"><header className="panel-header"><h2><Glyph>▧</Glyph> Image Evidence &amp; CV Summary</h2><span className="chip">{sampleScenario ? 'SYNTHETIC IMAGE PAIR' : result || previews ? 'UPLOADED IMAGE PAIR' : 'REFERENCE SAMPLE'}</span><span className="report-panel-meta">{sampleScenario ? 'COMPUTER-GENERATED · NO GEOLOCATION' : previews ? 'RGB INPUTS · NO GEOLOCATION' : 'SAMPLE SENSOR METADATA · UNVERIFIED'}</span></header><div className="evidence-triptych">
       <article className="evidence-frame"><div className="evidence-frame-head"><b>PANEL A · T0 BASELINE</b><span>{previews ? before?.name : 'SAMPLE · SENTINEL-2C'}</span></div><img src={previews ? previews.before : '/samples/report-before.png'} alt={previews ? 'Baseline image for report' : 'Illustrative baseline satellite scene'} /><div className="evidence-caption">{previews ? 'Uploaded baseline · RGB preview' : 'Illustrative reference image · not an analyzed input'}</div></article>
       <article className="evidence-frame"><div className="evidence-frame-head"><b>PANEL B · T1 LATEST</b><span>{previews ? after?.name : 'SAMPLE · WORLDVIEW-3'}</span></div><img src={previews ? previews.after : '/samples/report-after.png'} alt={previews ? 'Latest image for report' : 'Illustrative latest satellite scene'} /><div className="evidence-caption">{previews ? 'Uploaded latest image · RGB preview' : 'Illustrative reference image · not an analyzed input'}</div></article>
-      <article className="evidence-frame delta-frame"><div className="evidence-frame-head"><b>PANEL C · PIXEL DELTA</b><span>{result ? 'LOCAL CV METRICS' : isSample ? 'SAMPLE ONLY' : 'ANALYSIS PENDING'}</span></div><div className="delta-summary"><div className="delta-glyph">Δ</div><b>{result ? `${result.changed_percent.toFixed(2)}%` : isSample ? '+14.82%' : '—'}</b><span>{result ? 'pixels above fixed threshold' : isSample ? 'illustrative change value' : 'run comparison to calculate'}</span><div className="delta-track"><i style={{ width: `${result ? Math.min(result.changed_percent, 100) : isSample ? 62 : 0}%` }} /></div><small>{result ? `${result.changed_regions} connected candidate regions` : isSample ? 'No CV analysis has been run' : 'Analysis pending'}</small></div><div className="evidence-caption">{result ? 'No spatial mask returned by the current API' : isSample ? 'Reference figure · not a generated mask' : 'Mask preview not available from current API'}</div></article>
+      <article className="evidence-frame delta-frame"><div className="evidence-frame-head"><b>PANEL C · PIXEL DELTA</b><span>{result ? 'LOCAL CV METRICS' : isSample ? 'SAMPLE ONLY' : 'ANALYSIS PENDING'}</span></div><div className="delta-summary"><div className="delta-glyph">Δ</div><b>{result ? `${result.changed_percent.toFixed(2)}%` : isSample ? '+14.82%' : '—'}</b><span>{result ? 'pixels above fixed threshold' : isSample ? 'illustrative change value' : 'run comparison to calculate'}</span><div className="delta-track"><i style={{ width: `${result ? Math.min(result.changed_percent, 100) : isSample ? 62 : 0}%` }} /></div><small>{result ? `${result.changed_regions} connected candidate regions` : isSample ? 'No CV analysis has been run' : 'Analysis pending'}</small></div>{result && <img className="annotated-evidence" src={apiUrl(result.annotated_image_url)} alt="OpenCV annotated after image highlighting changed pixels and connected regions" />}<div className="evidence-caption">{result ? 'Backend annotation · red pixels show thresholded change; boxes show returned candidate regions' : isSample ? 'Reference figure · not a generated mask' : 'Run comparison to generate annotated evidence'}</div></article>
     </div><div className="comparison-metadata"><span>T0: {previews ? before?.name : '2024-04-12 · sample timestamp'}</span><span>T1: {previews ? after?.name : '2024-10-28 · sample timestamp'}</span><span>CO-REGISTRATION: {result ? 'DIMENSION RESIZE ONLY' : previews ? 'NOT PERFORMED' : 'SAMPLE VALUE NOT VERIFIED'}</span><span>BANDING: {previews ? 'RGB FILES' : 'SAMPLE METADATA ONLY'}</span></div></section>
 
     <section className="report-analysis-grid">
       <article className="panel report-facts"><header className="panel-header"><h2><Glyph>⌕</Glyph> Computer Vision Observations</h2><span className="chip chip-lime">DETERMINISTIC METRICS</span></header><div className="report-card-body">{result ? <><div className="fact-row"><span className="fact-id">OBSERVED CV FACT 01</span><b>Changed pixels</b><p>{result.changed_pixels.toLocaleString()} of {result.total_pixels.toLocaleString()} pixels exceeded the backend's fixed grayscale difference threshold.</p><small>METHOD: ABSOLUTE DIFFERENCE · THRESHOLD 30/255</small></div><div className="fact-row"><span className="fact-id">OBSERVED CV FACT 02</span><b>Connected candidate regions</b><p>{result.changed_regions} connected components met the minimum 16-pixel area filter.</p><small>GEOGRAPHIC EXTENT: NOT AVAILABLE</small></div><div className="fact-row"><span className="fact-id">PROCESSING NOTE</span><b>Dimension handling</b><p>The latest image is resized to the baseline dimensions when the pair does not match.</p><small>GEOREFERENCED ALIGNMENT: NOT PERFORMED</small></div></> : previews ? <><div className="fact-row"><span className="fact-id">INPUT STATUS</span><b>Two images selected</b><p>{before?.name} and {after?.name} are ready for the local comparison.</p><small>ANALYSIS: NOT RUN</small></div><div className="fact-row"><span className="fact-id">AVAILABLE METHOD</span><b>Local OpenCV comparison</b><p>Run the image comparison to measure thresholded pixel change and connected candidate regions.</p><small>NO EXTERNAL MODEL REQUIRED</small></div><div className="fact-row"><span className="fact-id">SPATIAL METRICS</span><b>Not available for this pair</b><p>Geographic area, pixel footprint in km², and georeferenced alignment are not produced.</p><small>LOCATION METADATA: UNAVAILABLE</small></div></> : <><div className="fact-row sample-fact"><span className="fact-id">SAMPLE CLAIM · NOT VERIFIED</span><b>Reported surface change: +14.82%</b><p>This figure is copied from the visual reference only. No uploaded image pair has been analyzed in this session.</p><small>LOCAL ANALYSIS STATUS: AWAITING INPUT</small></div><div className="fact-row sample-fact"><span className="fact-id">SAMPLE CLAIM · NOT VERIFIED</span><b>Reported brine expansion: 2.41 km²</b><p>OrbitalPulse cannot calculate physical area without georeferenced imagery and spatial registration.</p><small>GEOSPATIAL AREA: NOT AVAILABLE</small></div><div className="fact-row sample-fact"><span className="fact-id">AVAILABLE METHOD</span><b>Local OpenCV comparison</b><p>Upload two RGB images to measure thresholded pixel change and connected candidate regions.</p><small>NO EXTERNAL MODEL REQUIRED</small></div></>}</div><footer className="report-panel-footer"><span>PIPELINE: OPENCV GRAYSCALE ABSOLUTE DIFFERENCE</span><span>CAUSE CLASSIFICATION: NOT PERFORMED</span></footer></article>
 
-      <article className="panel report-ai"><header className="panel-header"><h2><Glyph>✳</Glyph> AI Diagnostic Engine</h2><span className={`chip ${result || previews ? '' : 'chip-lime'}`}>{result || previews ? 'NOT CONFIGURED' : 'SAMPLE NARRATIVE DISABLED'}</span></header><div className="report-card-body"><div className="ai-state"><div className="ai-state-icon">AI</div><div><b>{result ? 'No AI inference was generated' : previews ? 'Analysis pending · AI inference unavailable' : 'The reference narrative is not an OrbitalPulse result'}</b><p>{result || previews ? 'VISION_PROVIDER is disabled. The report does not infer cause, intent, hazard severity, or confidence from pixel metrics.' : 'The attached design includes synthetic attribution and sensor values. Those claims are excluded from the live report.'}</p></div></div><div className="hypothesis-list"><span className="section-label">HYPOTHESES &amp; VERIFICATION</span><div><b>Natural versus human-made cause</b><em>UNASSESSED</em><small>Requires contextual evidence beyond RGB pixel differences.</small></div><div><b>Rainfall or seasonal conditions</b><em>NOT CHECKED</em><small>No weather or acquisition metadata is connected.</small></div><div><b>Geospatial location and affected area</b><em>UNAVAILABLE</em><small>Uploaded images do not include usable coordinates in this pipeline.</small></div></div><button className="button button-secondary ai-configure" onClick={onConfigure}>Configure optional vision provider <Glyph>→</Glyph></button></div><footer className="report-panel-footer"><span>AI CONFIDENCE: NOT AVAILABLE</span><span>EXTERNAL PROVIDER: DISABLED</span></footer></article>
+      <article className="panel report-ai"><header className="panel-header"><h2><Glyph>✳</Glyph> AI Diagnostic Engine</h2><span className={`chip ${result || previews ? '' : 'chip-lime'}`}>{result?.ai_analysis ? 'MODEL OUTPUT' : result || previews ? 'CV FALLBACK' : 'SAMPLE NARRATIVE DISABLED'}</span></header><div className="report-card-body"><div className="ai-state"><div className="ai-state-icon">AI</div><div><b>{result?.ai_analysis ? 'Optional vision-model assessment' : result ? 'No AI inference was generated' : previews ? 'Analysis pending · AI inference unavailable' : 'The reference narrative is not an OrbitalPulse result'}</b><p>{result?.ai_analysis ?? (result || previews ? 'The local CV fallback reports observed pixel differences and connected regions; it does not infer cause, intent, hazard severity, or confidence.' : 'The attached design includes synthetic attribution and sensor values. Those claims are excluded from the live report.')}</p></div></div><div className="hypothesis-list"><span className="section-label">HYPOTHESES &amp; VERIFICATION</span><div><b>Natural versus human-made cause</b><em>UNASSESSED</em><small>Requires contextual evidence beyond RGB pixel differences.</small></div><div><b>Rainfall or seasonal conditions</b><em>NOT CHECKED</em><small>No weather or acquisition metadata is connected.</small></div><div><b>Geospatial location and affected area</b><em>UNAVAILABLE</em><small>Uploaded images do not include usable coordinates in this pipeline.</small></div></div><button className="button button-secondary ai-configure" onClick={onConfigure}>Configure optional vision provider <Glyph>→</Glyph></button></div><footer className="report-panel-footer"><span>{result?.ai_analysis ? 'OPTIONAL VISION MODEL OUTPUT' : 'LOCAL CV FALLBACK'}</span><span>{result?.ai_analysis ? 'REVIEW MODEL LIMITATIONS' : 'CAUSE UNCLASSIFIED'}</span></footer></article>
     </section>
 
     <section className="panel recommended-actions"><header className="panel-header"><h2><Glyph>✓</Glyph> Recommended Verification Steps</h2><span className="report-panel-meta">ANALYST CHECKLIST · NOT AN AUTOMATED DIRECTIVE</span></header><div className="verification-grid"><article><span className="action-step">STEP 01 · REQUIRED</span><h3>Confirm image alignment</h3><p>Use the same geographic footprint and validate co-registration before treating pixel changes as physical changes.</p><button onClick={onCompare}>Open image comparison →</button></article><article><span className="action-step">STEP 02 · CONTEXT</span><h3>Review acquisition conditions</h3><p>Check capture dates, illumination, cloud cover, and sensor differences for possible false change signals.</p><button onClick={onCompare}>Review image pair →</button></article><article><span className="action-step">STEP 03 · OPTIONAL</span><h3>Collect independent evidence</h3><p>Use georeferenced multispectral or SAR data and trusted ground context before assigning a cause.</p><button onClick={onConfigure}>View provider settings →</button></article></div></section>

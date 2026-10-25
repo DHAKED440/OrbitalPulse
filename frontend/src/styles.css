@@ -207,7 +207,7 @@ button:focus-visible, input:focus-visible { outline: 1px solid #d7ff64; outline-
 .dossier-button:hover { background: #30343b; }.dossier-button .glyph { font-size: 13px; }.dossier-button small { color: #9fa997; font-size: 7px; }.dossier-button b { margin-left: auto; font-size: 15px; }
 
 .modal-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 20px; background: #080a0fc9; backdrop-filter: blur(4px); }
-.modal { width: min(640px, 100%); padding: 18px; background: #1c1f26; border: 1px solid #414751; box-shadow: 0 20px 80px #0008; }
+.modal { width: min(640px, 100%); max-height: calc(100vh - 40px); overflow-y: auto; padding: 18px; background: #1c1f26; border: 1px solid #414751; box-shadow: 0 20px 80px #0008; }
 .modal > header { display: flex; align-items: flex-start; justify-content: space-between; }
 .modal h2 { margin: 4px 0 0; font-size: 21px; font-weight: 550; }
 .modal-copy { color: #aeb7b5; font-size: 11px; line-height: 1.55; }
@@ -266,6 +266,7 @@ button:focus-visible, input:focus-visible { outline: 1px solid #d7ff64; outline-
   .metrics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin: 7px 0 10px; }.metric-card { min-height: 96px; padding: 8px; }.metric-label { font-size: 6px; letter-spacing: .06em; }.metric-value { font-size: 18px; }.metric-value small { font-size: 7px; }.metric-foot { font-size: 6px; }
   .panel-header { gap: 4px; padding: 0 7px; }.panel-header h2 { font-size: 10px; }.panel-header .chip { font-size: 6px; }.sort-button { display: none; }.target-row { padding: 9px 8px; }.target-row h3 { font-size: 10px; }.target-meta, .target-bottom { font-size: 7px; }.target-meta { flex-wrap: wrap; }.confidence small { display: none; }.mini-button { font-size: 7px; padding: 0 5px; }
   .file-slots { grid-template-columns: 1fr; }.file-slot { min-height: 115px; }.modal { padding: 13px; }.modal > footer { align-items: flex-start; flex-direction: column; }.modal > footer .button { width: 100%; }
+  .sample-scenario { align-items: flex-start; flex-direction: column; }
 }
 
 /* High-density image-comparison workstation */
@@ -349,6 +350,18 @@ button:focus-visible, input:focus-visible { outline: 1px solid #d7ff64; outline-
 .region-selector button { display: grid; grid-template-columns: 43px minmax(0, 1fr) auto; align-items: center; gap: 5px; min-height: 28px; padding: 4px 5px; background: #101319; border: 1px solid #292f37; color: #c5cbc8; text-align: left; }
 .region-selector button:hover, .region-selector button.selected { border-color: #708042; background: #20251b; }
 .region-selector button b, .region-selector button small { color: var(--lime); font: 7px var(--mono); }.region-selector button span { overflow: hidden; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }.region-selector button small { color: #b8c5b0; }
+.selected-region-box { position: absolute; z-index: 4; border: 2px solid #d3ff48; box-shadow: 0 0 0 9999px #0002, 0 0 12px #d3ff48aa; pointer-events: none; }
+.selected-region-box b { position: absolute; top: -16px; left: -2px; padding: 2px 4px; background: #c9f44b; color: #14170c; font: 8px var(--mono); }
+.metadata-fields { display: grid; grid-template-columns: minmax(160px, 1fr) 1fr 1fr; gap: 8px; margin: 12px 0; }
+.metadata-fields label { display: grid; gap: 5px; color: #adb3ad; font: 8px var(--mono); letter-spacing: .06em; }
+.metadata-fields input { width: 100%; min-width: 0; padding: 8px; background: #111419; border: 1px solid #343a42; border-radius: 3px; color: #e3e8e1; font: 11px var(--mono); }
+.server-samples { display: grid; gap: 6px; margin: 10px 0; padding: 10px; background: #191c22; border: 1px solid #30343b; color: #c9d0c5; font: 9px var(--mono); }
+.sample-scenario { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px; background: #111419; border: 1px solid #2c3239; }
+.sample-scenario > div { display: grid; justify-items: start; gap: 4px; }
+.sample-scenario > div > b { color: #e6eae4; font: 10px/1.4 Inter, ui-sans-serif, system-ui, sans-serif; }
+.sample-scenario p { margin: 0; color: #aab3ad; font: 9px/1.4 Inter, ui-sans-serif, system-ui, sans-serif; }
+.sample-scenario small { color: #d3e978; font: 7px/1.45 var(--mono); }
+.server-samples > small { color: #909a94; }
 .spectrum-card svg { display: block; width: 100%; height: 53px; overflow: visible; }
 .spectrum-card path { fill: none; stroke: #ff7275; stroke-width: 1.5; }.spectrum-card path.spectral-secondary { stroke: #a7b4a6; stroke-width: 1; stroke-dasharray: 2 3; }.spectrum-card circle { fill: var(--lime); stroke: #15181e; stroke-width: 1; }
 .band-legend { display: flex; justify-content: space-between; gap: 4px; color: #a1aaa5; font: 7px var(--mono); }.band-legend b { display: block; margin-top: 2px; color: #d9ded9; font-weight: 400; }
@@ -388,6 +401,8 @@ button:focus-visible, input:focus-visible { outline: 1px solid #d7ff64; outline-
 .report-page { min-width: 0; }
 .report-security { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; min-height: 27px; margin: -4px -4px 8px; padding: 5px 8px; background: #0b0e13; border: 1px solid #282e36; color: #a7b1a8; font: 7px var(--mono); letter-spacing: .055em; }
 .report-security > span { display: inline-flex; align-items: center; gap: 5px; }.report-security > span:first-child { color: var(--lime); }.report-integrity { margin-left: auto; color: var(--sage); }
+.synthetic-report-banner { display: grid; gap: 4px; margin: 0 0 9px; padding: 9px 11px; background: #30291b; border: 1px solid #76653a; color: #e6d195; font: 8px/1.45 var(--mono); }
+.synthetic-report-banner b { color: #f0d577; letter-spacing: .06em; }.synthetic-report-banner span { color: #e7e1ce; font: 10px/1.4 Inter, ui-sans-serif, system-ui, sans-serif; }.synthetic-report-banner small { color: #d4c691; font: 7px var(--mono); }
 .report-breadcrumb { margin: 0 0 4px; color: #939d98; font: 8px var(--mono); }.report-breadcrumb i { margin: 0 5px; color: #58615f; font-style: normal; }.report-breadcrumb b { color: var(--lime); font-weight: 500; }
 .report-titlebar { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin: 7px 0 13px; }
 .report-titlebar h1 { margin: 3px 0 6px; color: var(--text); font-size: 25px; font-weight: 600; letter-spacing: -.025em; }
@@ -417,6 +432,7 @@ button:focus-visible, input:focus-visible { outline: 1px solid #d7ff64; outline-
 .delta-glyph { display: grid; place-items: center; width: 31px; height: 31px; margin-bottom: 5px; border: 1px solid #758b3d; border-radius: 50%; color: var(--lime); font: 17px var(--mono); }
 .delta-summary > b { color: var(--lime); font-size: 19px; }.delta-summary > span, .delta-summary > small { margin-top: 3px; color: #b6beb6; font: 7px var(--mono); }
 .delta-track { width: 83%; height: 5px; margin: 8px 0 3px; background: #363b39; }.delta-track i { display: block; height: 100%; background: #c8eb5b; }
+.annotated-evidence { display: block; width: 100%; max-height: 145px; object-fit: contain; background: #0e1117; border-top: 1px solid #2a3038; }
 .comparison-metadata { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 8px 8px; }.comparison-metadata span { padding: 4px 6px; background: #101319; border: 1px solid #2a3038; color: #9da7a2; font: 6px var(--mono); }
 .report-analysis-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; margin-bottom: 11px; }
 .report-analysis-grid .panel { display: flex; min-width: 0; flex-direction: column; }
@@ -458,6 +474,6 @@ button:focus-visible, input:focus-visible { outline: 1px solid #d7ff64; outline-
 @media print {
   .topbar, .sidebar, .report-actions, .verification-grid button, .signoff-status button { display: none !important; }
   .main-area { width: 100%; max-width: none; margin: 0; padding: 0; }.workstation, .main-area { background: white !important; color: #111 !important; }
-  .report-page { color: #111; }.report-page .panel, .report-hero, .report-signoff { break-inside: avoid; background: white !important; border-color: #777 !important; }.report-page * { color-adjust: exact; -webkit-print-color-adjust: exact; }
+  .report-page { color: #111; }.report-page .panel, .report-hero, .report-signoff { break-inside: avoid; background: white !important; border-color: #777 !important; }.report-page * { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
   .comparison-layout, .report-analysis-grid { break-inside: avoid; }
 }

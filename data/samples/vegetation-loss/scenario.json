@@ -1,0 +1,8 @@
+{
+  "id": "vegetation-loss",
+  "title": "Vegetation loss",
+  "category": "VEGETATION LOSS",
+  "description": "Synthetic scrubland with a broad cleared patch exposing dry soil.",
+  "expected_change": "Large connected clearing with a strong vegetation-to-soil pixel delta.",
+  "synthetic": true
+}

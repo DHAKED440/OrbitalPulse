@@ -1,0 +1,8 @@
+{
+  "id": "flood-expansion",
+  "title": "Flood-like water expansion",
+  "category": "WATER EXPANSION",
+  "description": "Synthetic dry channel and floodplain with a wider, deeper blue water footprint in the later frame.",
+  "expected_change": "A broad connected water expansion across the lower image area.",
+  "synthetic": true
+}

@@ -1,0 +1,8 @@
+{
+  "id": "new-construction",
+  "title": "New construction & land disturbance",
+  "category": "CONSTRUCTION",
+  "description": "Synthetic undeveloped terrain with a new building pad, structures, and graded access road.",
+  "expected_change": "Several connected construction surfaces and a linear access-road disturbance.",
+  "synthetic": true
+}
