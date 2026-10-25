@@ -1,14 +1,16 @@
-from datetime import date
-from uuid import uuid4
+from datetime import date, datetime, timezone
+from typing import Literal
 
-import cv2
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import Response
+from pydantic import ValidationError
 
 from app.core.config import get_settings
-from app.schemas.analysis import AnalysisResponse
-from app.services.change_detection import InvalidImageError, compare_images, validate_image
-from app.services.storage import save_upload
-from app.services.vision import get_vision_provider
+from app.schemas.analysis import AnalysisResponse, SamplesResponse
+from app.services.analysis import analyze_uploads
+from app.services.change_detection import InvalidImageError
+from app.services.reporting import build_intelligence_report, report_html, report_json, report_markdown
+from app.services.storage import UploadTooLargeError, list_sample_scenarios, load_report
 
 router = APIRouter(prefix="/api", tags=["analysis"])
 ALLOWED_TYPES = {"image/png", "image/jpeg", "image/webp"}
@@ -18,58 +20,81 @@ ALLOWED_TYPES = {"image/png", "image/jpeg", "image/webp"}
 async def analyze_images(
     before_image: UploadFile = File(...),
     after_image: UploadFile = File(...),
-    location: str | None = Form(default=None, max_length=200),
-    before_date: date | None = Form(default=None),
-    after_date: date | None = Form(default=None),
+    location: str | None = Form(None, max_length=200),
+    before_acquisition_date: date | None = Form(None),
+    after_acquisition_date: date | None = Form(None),
+    comparison_mode: Literal["registered", "original"] = Form("registered"),
+    ai_consent: bool = Form(False),
 ) -> AnalysisResponse:
-    settings = get_settings()
-    for upload in (before_image, after_image):
-        if upload.content_type not in ALLOWED_TYPES:
-            raise HTTPException(status_code=415, detail="Only PNG, JPEG, and WebP images are supported")
-    if before_date and after_date and before_date > after_date:
-        raise HTTPException(status_code=422, detail="Baseline date must be on or before latest image date")
-    upload_dir = settings.storage_dir / "uploads"
-    saved = []
+    uploads = (before_image, after_image)
     try:
-        max_bytes = settings.max_upload_mb * 1024 * 1024
-        for upload in (before_image, after_image):
-            path = await save_upload(upload, upload_dir, max_bytes)
-            saved.append(path)
-            validate_image(path)
-        metrics, annotated = compare_images(saved[0], saved[1])
-    except ValueError as exc:
-        for path in saved:
-            path.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception:
-        for path in saved:
-            path.unlink(missing_ok=True)
-        raise
-
-    provider = get_vision_provider(settings.vision_provider)
-    try:
-        ai_analysis = await provider.explain_changes(str(saved[0]), str(saved[1]), str(metrics["summary"])) if provider else None
-    except Exception:
-        # Keep local CV useful when an optional remote provider is unavailable.
-        ai_analysis = None
+        for upload in uploads:
+            if upload.content_type not in ALLOWED_TYPES:
+                raise HTTPException(status_code=415, detail="Only PNG, JPEG, and WebP images are supported")
+        try:
+            return await analyze_uploads(
+                before_image,
+                after_image,
+                location=location.strip() if location and location.strip() else None,
+                before_acquisition_date=before_acquisition_date,
+                after_acquisition_date=after_acquisition_date,
+                comparison_mode=comparison_mode,
+                ai_consent=ai_consent,
+                settings=get_settings(),
+            )
+        except UploadTooLargeError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        except InvalidImageError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
-        for path in saved:
-            path.unlink(missing_ok=True)
-    analysis_id = uuid4().hex
-    results_dir = settings.storage_dir / "results"
-    results_dir.mkdir(parents=True, exist_ok=True)
-    annotated_path = results_dir / f"{analysis_id}.png"
-    if not cv2.imwrite(str(annotated_path), annotated):
-        raise HTTPException(status_code=500, detail="Could not save annotated comparison image")
-    report = AnalysisResponse(
-        analysis_id=analysis_id,
-        location=location.strip() if location and location.strip() else None,
-        before_date=before_date,
-        after_date=after_date,
-        annotated_image_url=f"/api/reports/{analysis_id}/annotated",
-        report_url=f"/api/reports/{analysis_id}",
-        ai_analysis=ai_analysis,
-        **metrics,
+        for upload in uploads:
+            await upload.close()
+
+
+@router.get("/samples", response_model=SamplesResponse)
+def get_samples() -> SamplesResponse:
+    settings = get_settings()
+    return SamplesResponse(samples=list_sample_scenarios(settings.samples_dir))
+
+
+@router.get("/report/{analysis_id}", response_model=AnalysisResponse)
+def get_report(analysis_id: str) -> AnalysisResponse:
+    return _get_valid_report(analysis_id)
+
+
+@router.get("/report/{analysis_id}/download")
+def download_report(
+    analysis_id: str,
+    format: Literal["json", "markdown", "html"] = Query("json"),
+) -> Response:
+    report = _get_valid_report(analysis_id)
+    if format == "json":
+        content, media_type = report_json(report), "application/json"
+    elif format == "markdown":
+        content, media_type = report_markdown(report), "text/markdown; charset=utf-8"
+    else:
+        content, media_type = report_html(report), "text/html; charset=utf-8"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="orbitalpulse-{analysis_id}.{format}"'},
     )
-    (results_dir / f"{analysis_id}.json").write_text(report.model_dump_json(indent=2), encoding="utf-8")
-    return report
+
+
+def _get_valid_report(analysis_id: str) -> AnalysisResponse:
+    settings = get_settings()
+    results_dir = settings.storage_dir / "results"
+    data = load_report(results_dir, analysis_id, settings.report_retention_hours * 3600)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Analysis report was not found or has expired")
+    # Backfill reports written by an earlier app version using the retained file's timestamp.
+    if "report" not in data:
+        try:
+            stored_at = datetime.fromtimestamp((results_dir / f"{analysis_id}.json").stat().st_mtime, timezone.utc)
+        except OSError:
+            raise HTTPException(status_code=404, detail="Analysis report was not found or has expired") from None
+        data["report"] = build_intelligence_report(data, timestamp=stored_at).model_dump(mode="json")
+    try:
+        return AnalysisResponse.model_validate(data)
+    except ValidationError:
+        raise HTTPException(status_code=500, detail="The retained analysis report is invalid") from None

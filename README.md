@@ -1,16 +1,14 @@
 # OrbitalPulse
 
-OrbitalPulse is a hackathon-scale satellite and aerial imagery change-detection foundation. It compares two images locally with OpenCV and produces a basic explainable report without requiring an external AI service. Optional vision analysis is isolated behind a provider interface for later integration.
+OrbitalPulse is a hackathon-scale satellite and aerial imagery change-detection foundation. It compares two images locally with OpenCV and produces an explainable report without requiring an external AI service. Optional semantic interpretation is isolated behind a configurable provider interface.
 
 ## Repository architecture
 
 - `frontend/`: React, TypeScript, Vite, Tailwind CSS interface and typed API client.
 - `backend/`: FastAPI routes, Pydantic schemas, configuration, local storage, and modular CV/vision services.
 - `backend/data/`: runtime upload and result directories (ignored by Git).
-- `data/samples/`: labeled, generated synthetic scenario pairs and metadata (not satellite observations).
+- `data/samples/`: deterministic synthetic image pairs for local demonstrations.
 - `docs/`: architecture and implementation notes.
-
-There was no pre-existing application or dependency manifest in the repository; this foundation uses the requested stack.
 
 ## Requirements
 
@@ -29,18 +27,18 @@ python -m pip install -r backend/requirements.txt
 npm install
 ```
 
-Set `VITE_API_BASE_URL` to the backend origin when the browser should call it directly (for example `http://127.0.0.1:8000`). Leave it empty to use the Vite `/api` proxy. `VITE_MAX_UPLOAD_MB` configures the browser-side size limit; keep it aligned with `MAX_UPLOAD_MB` on the backend. Set optional provider values only if a compatible vision provider is enabled. No API key is needed for local change detection.
+Local computer-vision analysis needs no API key. Optional semantic interpretation uses the OpenAI Responses API and stays disabled by default. To enable it, set `VISION_PROVIDER=openai`, `VISION_API_KEY` to a backend-only API key, and `VISION_MODEL` to a vision-capable model that supports strict JSON Schema output. Set the timeout and image/payload limits with `VISION_REQUEST_TIMEOUT_SECONDS`, `VISION_MAX_IMAGE_DIMENSION`, `VISION_MAX_IMAGE_BYTES`, `VISION_MAX_PAYLOAD_BYTES`, and `VISION_MAX_REGION_CROPS`. Never put the key in frontend configuration.
 
 ## Run
 
-From the repository root, start the API in one terminal:
+Start the API in one terminal:
 
 ```powershell
 backend/.venv/Scripts/Activate.ps1
 uvicorn app.main:app --reload --app-dir backend
 ```
 
-From the repository root, start the frontend in a second terminal:
+Start the frontend in another terminal:
 
 ```powershell
 npm run dev
@@ -48,49 +46,45 @@ npm run dev
 
 Open the Vite URL (normally `http://localhost:5173`). The frontend proxies `/api` requests to `http://127.0.0.1:8000`. API docs are at `http://127.0.0.1:8000/docs`.
 
-The complete first-time PowerShell setup and run sequence is:
+## API
 
-```powershell
-Copy-Item .env.example .env
-python -m venv backend/.venv
-backend/.venv/Scripts/Activate.ps1
-python -m pip install -r backend/requirements.txt
-npm install
-# Terminal 1 (repository root):
-uvicorn app.main:app --reload --app-dir backend
-# Terminal 2 (repository root):
-npm run dev
-```
+- `GET /api/health`: backend status plus whether a usable AI provider is available. The current placeholder provider is unavailable; credentials are never returned.
+- `POST /api/analyze`: multipart upload with required `before_image` and `after_image`; optional `location`, `before_acquisition_date`, `after_acquisition_date`, `comparison_mode` (`registered` by default, or `original` to skip registration and appearance normalization), and `ai_consent` (defaults to false). Dates use `YYYY-MM-DD`.
+- `GET /api/samples`: lists complete synthetic demo pairs and their metadata. `GET /api/samples/{scenario_id}/{filename}` serves only the listed pair assets.
+- `GET /api/report/{analysis_id}`: retrieves the validated analysis and intelligence report for 24 hours by default; expired or unknown IDs return `404`.
+- `GET /api/report/{analysis_id}/download?format=json|markdown|html`: downloads the same retained report (JSON by default), including metrics, regions, evidence previews, classification details, caveats, and verification steps. Unknown or expired IDs return `404`.
 
-In the New Analysis dialog choose both T0 and T1 images (or assign backend samples), optionally enter location/date metadata, then select **Analyze Changes**. The comparison view displays backend pixel metrics and the saved annotated image; selecting a returned region highlights its bounding box. Open Intelligence Report to retrieve and show the persisted report. AI inference is optional and local CV results remain available if the provider is disabled or fails.
+The CV service aligns compatible working copies with ORB feature matches and a RANSAC homography. It rejects singular, poorly supported, implausible, and low-overlap transformations before warping. If registration cannot be trusted, it compares resized images without registration and reports a warning. Registered mode performs robust percentile brightness/contrast matching, CLAHE normalization, local SSIM, intensity and edge comparisons, morphology, and connected-component filtering. Region filters are configured with `CHANGE_THRESHOLD`, `MIN_REGION_AREA`, and `MIN_REGION_PERCENT`. The response includes region IDs, boxes, pixel areas, valid-area percentages, relative size categories (small <0.1%, medium 0.1–1%, large ≥1%), edge/texture/color difference indicators, and annotated/difference previews. These indicators describe image evidence only; they do not identify real-world event types. Region coordinates and pixel areas use the before-image pixel grid; no geospatial area is inferred.
+
+The output is a first-pass image comparison, not a validated satellite-event detector. Clouds and haze can obscure the ground and generate broad differences; seasonal vegetation, water levels, agricultural cycles, shadows, and sun-angle changes can resemble events. Different sensors, spectral bands, resolutions, orthorectification, or substantial misalignment can also produce false positives or missed changes. Registration fallback explicitly warns that geometric alignment was not applied. Use `comparison_mode=original` to inspect unregistered, unnormalized appearance as supporting evidence.
+
+### Optional semantic interpretation and image transfer
+
+When `VISION_PROVIDER=openai` is configured, the browser checkbox requires the user to consent for each analysis before the backend sends the two downscaled images and up to `VISION_MAX_REGION_CROPS` before/after region crops to OpenAI for semantic interpretation. The transfer occurs only when both configuration and `ai_consent=true` are present. Without consent, the provider is not called and the local CV report is returned with `semantic_status=consent_required`. Provider outages, rate limits, timeouts, and malformed output likewise do not discard CV results; see `semantic_status` and `semantic_error` in the response. The backend uses the OpenAI Responses API with `store:false`, bounded payloads and a timeout. Review OpenAI's current [image input](https://developers.openai.com/api/docs/guides/images-vision?api-mode=responses) and [structured output](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses) requirements when selecting a model. Configure account and data handling according to your organization’s requirements.
+
+The semantic response separates visible observation, possible explanation, evidence, alternatives, unknowns, and limitations. Categories and indicators are model interpretations, not verified ground truth; they do not establish illegality, intent, or responsibility. The API key remains backend-only. Semantic statuses are `not_requested`, `consent_required`, `unavailable`, `complete`, `failed`, and `rate_limited`.
+
+### Intelligence report rules
+
+Every new analysis includes a UTC timestamp, category, classification source, visual-evidence references, region IDs/boxes and pixel areas, alternatives, limitations, and recommended verification steps. AI classifications retain the model's category but do not receive a fabricated confidence score; current provider responses do not supply calibrated confidence. If semantic interpretation was unavailable, the category is `UNCERTAIN`, the source is `COMPUTER_VISION_HEURISTIC`, and narrative fields are limited to measured CV output plus explicit uncertainty.
+
+Severity is deliberately labeled **heuristic visual extent**, separate from event classification. Rules use changed percentage of valid comparison pixels and the largest region's percentage of that area: low when both are under 0.1%; high when changed area is at least 1% or the largest region is at least 0.5%; otherwise moderate. These rules describe image extent only. A large difference does not imply a severe disaster. HTML downloads escape user/model text; evidence images are embedded from the generated previews.
+
+Uploads are streamed to per-request temporary directories, limited by `MAX_UPLOAD_MB`, `MAX_IMAGE_DIMENSION`, and `MAX_IMAGE_PIXELS`, and removed after processing. `MAX_WORKING_DIMENSION` bounds CV memory use; `CHANGE_THRESHOLD` and `MIN_REGION_AREA` control mask sensitivity and region filtering. Reports are atomically written under server-generated IDs and expire after `REPORT_RETENTION_HOURS`. CORS defaults to the local Vite origins `http://localhost:5173` and `http://127.0.0.1:5173`; set `CORS_ORIGINS` to a comma-separated list to add frontend origins.
+
+Common errors include `400` for corrupt or over-dimensioned images, `413` for oversized files, `415` for unsupported declared media types, `422` for missing uploads or malformed metadata, and `404` for unavailable reports.
 
 ## Hackathon demo sequence
 
-Three reproducible **synthetic** image pairs are shipped under `data/samples/`: vegetation loss, new construction/land disturbance, and flood-like water expansion. They are computer-generated illustrations, not real satellite observations. Pair details and intended visual signals are in each folder's `scenario.json`. Regenerate them deterministically with:
+The repository includes three reproducible, computer-generated pairs in `data/samples/`: vegetation loss, new construction/land disturbance, and flood-like water expansion. These are explicitly synthetic fixtures, not satellite observations. Regenerate the exact pairs with `python scripts/generate_demo_samples.py`.
 
-```powershell
-python scripts/generate_demo_samples.py
-```
+1. Start the API and Vite frontend using the commands above.
+2. Select **Sample Scenarios** (or **New Analysis**) and load a synthetic pair. The chooser shows its scenario metadata and labels the images as computer generated.
+3. Inspect the T0/T1 captures in the comparison view, then run **Change Detection** to send that pair through the same configured backend pipeline as normal uploads.
+4. Review the returned changed-pixel percentage, connected candidate region count, and generated annotated/difference previews and report. No result metrics are shown as measured until the API returns them.
+5. Open **Intelligence Report** for the local CV findings, alternatives, limitations, and optional semantic interpretation. The local report works without AI credentials; event cause remains uncertain unless the optional provider completes.
 
-Recommended live sequence:
-
-1. Open **New Analysis → Choose Image Pair** and select **Load image pair** for **Vegetation loss**. The T0 and T1 file slots populate together and remain editable.
-2. Select **Analyze Changes**. The backend computes the normal OpenCV comparison; the UI has no preset metrics for any scenario.
-3. Use **Dual-Swipe** for before/after, then **Diff Heatmap** for the backend red pixel-difference overlay and **Vector Overlay** for backend candidate boxes. Click a detected region to highlight its pixel bounding box.
-4. Review the changed-pixel percentage, pixel count, image dimensions, and connected-region count returned by the API. Expect a broad clearing signal for vegetation loss, new pad/building/road signals for construction, and a large water-expansion signal for the flood-like pair. Exact metrics are generated at run time and may vary with CV/library versions.
-5. Open **Intelligence Report**. With `VISION_PROVIDER=disabled`, the report clearly marks AI as unavailable and presents the measured CV evidence as an analyst-review fallback. It also explains that this prototype does not georegister inputs or determine whether a cause is natural or human-made.
-6. Repeat for construction and flood-like expansion. The picker metadata identifies each pair as synthetic and summarizes the expected visible change.
-
-Backend sample discovery reads paired `before.png`/`after.png` files next to each valid `scenario.json` under `data/samples/`. Add future demos as new subfolders with this same layout and metadata; the UI always uses analysis results returned from the API.
-
-## API
-
-- `GET /api/health`: service status and active vision provider.
-- `GET /api/samples` and `GET /api/samples/{filename}`: list and retrieve images from `data/samples/`.
-- `POST /api/analyze`: multipart upload with `before_image`, `after_image`, and optional `location`, `before_date`, and `after_date`; validates size and image decoding, performs local CV, and returns measured metrics, pixel-coordinate regions, and annotated-image/report URLs.
-- `GET /api/reports/{analysis_id}` and `GET /api/reports/{analysis_id}/annotated`: retrieve a persisted analysis report and its annotated PNG from local temporary storage.
-
-The first CV implementation aligns images to the first image's dimensions using area interpolation, computes grayscale absolute difference, and thresholds changed pixels. Treat the result as a prototype signal: it is not geospatially registered and does not classify causes as natural or human-made. AI provider calls are deliberately not required by this path.
+Expected visuals: vegetation loss shows a cleared patch, construction shows a new disturbed footprint, and flood expansion shows an expanded water region. Each is designed to yield a visible pixel-change mask and candidate region(s); exact metrics depend on the configured registration and CV thresholds. Samples contain no georeferencing, so physical area and geographic coordinates are unavailable.
 
 ## Checks
 
@@ -102,7 +96,5 @@ backend/.venv/Scripts/python -m pytest backend/tests
 ## Next implementation steps
 
 1. Add geospatial registration and robust scene normalization before comparing satellite acquisitions.
-2. Add georeferenced raster support and physical area estimates.
-3. Implement a real provider adapter with timeouts, structured output validation, and provider-specific environment settings.
-4. Expand route tests for malformed files, upload limits, and provider failures.
-5. Evaluate the pipeline on representative imagery and clearly label uncertainty and false positives.
+2. Evaluate report severity thresholds against user-reviewed imagery.
+3. Evaluate the semantic and CV pipelines on representative imagery and clearly label uncertainty and false positives.
